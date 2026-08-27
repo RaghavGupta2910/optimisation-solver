@@ -2,7 +2,6 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
-#include <iostream>
 
 namespace mps {
 
@@ -14,20 +13,27 @@ model::Model MpsReader::read(const std::string& filepath) {
 
     model::Model model;
     std::string line;
+
+    // Reset internal state
     current_section_ = MpsSection::NONE;
-    objective_row_name_ = "";
+    objective_row_name_.clear();
     var_name_to_idx_.clear();
     constraint_name_to_idx_.clear();
+    row_senses_.clear();
+    obj_term_map_.clear();
+    constraint_term_maps_.clear();
+
+    // Default Phase 1 objective sense (Minimization)
+    model.objective.sense = model::ObjectiveSense::Minimize;
 
     while (std::getline(file, line)) {
-        // Skip empty lines and comment lines
         if (line.empty() || line[0] == '*') continue;
 
         std::stringstream ss(line);
         std::string token;
         ss >> token;
 
-        // Check for Header Section indicators (starts in column 1)
+        // Check for Header Section indicators (Column 1)
         if (line[0] != ' ' && line[0] != '\t') {
             if (token == "NAME") {
                 current_section_ = MpsSection::NAME;
@@ -59,27 +65,30 @@ model::Model MpsReader::read(const std::string& filepath) {
                 if (sense == "N") {
                     if (objective_row_name_.empty()) {
                         objective_row_name_ = row_name;
-                        model.objective.name = row_name;
                     }
                 } else {
                     model::Constraint constraint;
                     constraint.name = row_name;
-                    
-                    // Unified bound representation
+
+                    // Initial default bounds before RHS processing
                     if (sense == "L") {
                         constraint.lowerBound = -std::numeric_limits<double>::infinity();
                         constraint.upperBound = 0.0;
+                        row_senses_[row_name] = RowSense::LESS_EQUAL;
                     } else if (sense == "G") {
                         constraint.lowerBound = 0.0;
                         constraint.upperBound = std::numeric_limits<double>::infinity();
+                        row_senses_[row_name] = RowSense::GREATER_EQUAL;
                     } else if (sense == "E") {
                         constraint.lowerBound = 0.0;
                         constraint.upperBound = 0.0;
+                        row_senses_[row_name] = RowSense::EQUAL;
                     }
 
-                    size_t idx = model.constraints.size();
+                    size_t c_idx = model.constraints.size();
                     model.constraints.push_back(constraint);
-                    constraint_name_to_idx_[row_name] = idx;
+                    constraint_name_to_idx_[row_name] = c_idx;
+                    constraint_term_maps_.emplace_back();
                 }
                 break;
             }
@@ -93,7 +102,6 @@ model::Model MpsReader::read(const std::string& filepath) {
                     add_coefficient(var_name, row_name1, val1, model);
                 }
 
-                // Optional 2nd tuple on the same line
                 std::string row_name2;
                 double val2;
                 if (ss >> row_name2 >> val2) {
@@ -111,13 +119,15 @@ model::Model MpsReader::read(const std::string& filepath) {
                     auto it = constraint_name_to_idx_.find(row_name);
                     if (it != constraint_name_to_idx_.end()) {
                         auto& c = model.constraints[it->second];
-                        // Update bounds based on RHS value
-                        if (c.upperBound == 0.0 && c.lowerBound == -std::numeric_limits<double>::infinity()) {
-                            c.upperBound = val; // <= b
-                        } else if (c.lowerBound == 0.0 && c.upperBound == std::numeric_limits<double>::infinity()) {
-                            c.lowerBound = val; // >= b
-                        } else if (c.lowerBound == 0.0 && c.upperBound == 0.0) {
-                            c.lowerBound = val; // == b
+                        RowSense sense = row_senses_[row_name];
+
+                        // Set bounds based on explicitly tracked RowSense enum
+                        if (sense == RowSense::LESS_EQUAL) {
+                            c.upperBound = val;
+                        } else if (sense == RowSense::GREATER_EQUAL) {
+                            c.lowerBound = val;
+                        } else if (sense == RowSense::EQUAL) {
+                            c.lowerBound = val;
                             c.upperBound = val;
                         }
                     }
@@ -130,7 +140,7 @@ model::Model MpsReader::read(const std::string& filepath) {
                 std::string bound_label, var_name;
                 ss >> bound_label >> var_name;
 
-                size_t v_idx = get_or_create_variable(var_name, model);
+                int v_idx = get_or_create_variable(var_name, model);
                 auto& var = model.variables[v_idx];
                 double val = 0.0;
 
@@ -156,24 +166,30 @@ model::Model MpsReader::read(const std::string& filepath) {
         }
     }
 
-    // Validate the built model before returning
-    if (!model.validate()) {
-        throw std::runtime_error("MpsReader Error: Parsed model failed model.validate()");
+    // Convert internal accumulated maps into std::vector<model::LinearTerm>
+    for (const auto& pair : obj_term_map_) {
+        model.objective.linearTerms.push_back(model::LinearTerm{pair.first, pair.second});
+    }
+
+    for (size_t i = 0; i < model.constraints.size(); ++i) {
+        for (const auto& pair : constraint_term_maps_[i]) {
+            model.constraints[i].linearTerms.push_back(model::LinearTerm{pair.first, pair.second});
+        }
     }
 
     return model;
 }
 
-size_t MpsReader::get_or_create_variable(const std::string& var_name, model::Model& model) {
+int MpsReader::get_or_create_variable(const std::string& var_name, model::Model& model) {
     auto it = var_name_to_idx_.find(var_name);
     if (it != var_name_to_idx_.end()) {
-        return it->second;
+        return static_cast<int>(it->second);
     }
 
-    size_t new_idx = model.variables.size();
+    int new_idx = static_cast<int>(model.variables.size());
     model::Variable var;
     var.name = var_name;
-    var.type = model::VariableType::Continuous; // Continuous for Phase 1
+    var.type = model::VariableType::Continuous;
     var.lowerBound = 0.0;
     var.upperBound = std::numeric_limits<double>::infinity();
 
@@ -183,15 +199,15 @@ size_t MpsReader::get_or_create_variable(const std::string& var_name, model::Mod
 }
 
 void MpsReader::add_coefficient(const std::string& var_name, const std::string& row_name, double value, model::Model& model) {
-    get_or_create_variable(var_name, model);
+    int v_idx = get_or_create_variable(var_name, model);
 
     if (row_name == objective_row_name_) {
-        model.objective.linearTerms[var_name] += value;
+        obj_term_map_[v_idx] += value;
     } else {
         auto it = constraint_name_to_idx_.find(row_name);
         if (it != constraint_name_to_idx_.end()) {
             size_t c_idx = it->second;
-            model.constraints[c_idx].linearTerms[var_name] += value;
+            constraint_term_maps_[c_idx][v_idx] += value;
         }
     }
 }
