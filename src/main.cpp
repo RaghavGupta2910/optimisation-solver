@@ -41,10 +41,7 @@ int main() {
   std::cout << "Variables: " << problem.variables.size() << '\n';
   std::cout << "Constraints: " << problem.constraints.size() << '\n';
 
-  if (problem.validate()) {
-    std::cout << "Model validation: PASSED\n";
-  } else {
-    std::cout << "Model validation: FAILED\n";
-  }
+  std::cout << "Validation: " << (problem.validate() ? "PASSED" : "FAILED")
+            << '\n';
   return 0;
 }
