@@ -5,8 +5,9 @@ project(Optimisation_solver)
 add_executable(bench
     src/main.cpp
     src/model/model.cpp
+    src/presolve/presolver.cpp
 )
 
 target_include_directories(bench PRIVATE
-    include
+    ${PROJECT_SOURCE_DIR}/include
 )
