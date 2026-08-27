@@ -1,12 +1,31 @@
-#include <windows.h>
-
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 using namespace std;
 
+#ifdef _WIN32
+
+#include <windows.h>
+
+#else
+
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#endif
+
+
+namespace benchmark {
 
 // ============================================================
 // ProcessResult
@@ -14,82 +33,23 @@ using namespace std;
 
 struct ProcessResult {
 
-    // Exit code returned by the process
     int exitCode = -1;
 
-    // Captured output
-    string stdoutText;
-    string stderrText;
+    string stdoutOutput;
+    string stderrOutput;
 
-    // Wall-clock execution time
-    double runtimeSeconds = 0.0;
+    chrono::milliseconds runtime{0};
 
-    // Execution information
     bool timedOut = false;
     bool launchFailed = false;
 };
 
 
 // ============================================================
-// Read output from a pipe
+// WINDOWS IMPLEMENTATION
 // ============================================================
 
-string readPipe(HANDLE pipe) {
-
-    string output;
-
-    char buffer[4096];
-    DWORD bytesRead = 0;
-
-    while (true) {
-
-        DWORD available = 0;
-
-        if (!PeekNamedPipe(
-                pipe,
-                nullptr,
-                0,
-                nullptr,
-                &available,
-                nullptr)) {
-
-            break;
-        }
-
-        if (available == 0) {
-            break;
-        }
-
-        DWORD toRead =
-            min(
-                available,
-                static_cast<DWORD>(sizeof(buffer))
-            );
-
-        if (!ReadFile(
-                pipe,
-                buffer,
-                toRead,
-                &bytesRead,
-                nullptr)) {
-
-            break;
-        }
-
-        if (bytesRead == 0) {
-            break;
-        }
-
-        output.append(buffer, bytesRead);
-    }
-
-    return output;
-}
-
-
-// ============================================================
-// ProcessManager
-// ============================================================
+#ifdef _WIN32
 
 class ProcessManager {
 
@@ -98,21 +58,85 @@ public:
     ProcessResult run(
         const string& executable,
         const vector<string>& arguments,
-        int timeoutSeconds
+        chrono::milliseconds timeout
     ) {
 
         ProcessResult result;
 
+        SECURITY_ATTRIBUTES securityAttributes{};
+        securityAttributes.nLength =
+            sizeof(SECURITY_ATTRIBUTES);
+
+        securityAttributes.bInheritHandle = TRUE;
+
+
+        HANDLE stdoutRead = NULL;
+        HANDLE stdoutWrite = NULL;
+
+        HANDLE stderrRead = NULL;
+        HANDLE stderrWrite = NULL;
+
 
         // ----------------------------------------------------
-        // 1. Construct command line
+        // Create stdout pipe
         // ----------------------------------------------------
 
-        string commandLine = "\"" + executable + "\"";
+        if (!CreatePipe(
+                &stdoutRead,
+                &stdoutWrite,
+                &securityAttributes,
+                0)) {
+
+            result.launchFailed = true;
+            return result;
+        }
+
+
+        SetHandleInformation(
+            stdoutRead,
+            HANDLE_FLAG_INHERIT,
+            0
+        );
+
+
+        // ----------------------------------------------------
+        // Create stderr pipe
+        // ----------------------------------------------------
+
+        if (!CreatePipe(
+                &stderrRead,
+                &stderrWrite,
+                &securityAttributes,
+                0)) {
+
+            CloseHandle(stdoutRead);
+            CloseHandle(stdoutWrite);
+
+            result.launchFailed = true;
+            return result;
+        }
+
+
+        SetHandleInformation(
+            stderrRead,
+            HANDLE_FLAG_INHERIT,
+            0
+        );
+
+
+        // ----------------------------------------------------
+        // Build command line
+        // ----------------------------------------------------
+
+        string commandLine = "\"";
+        commandLine += executable;
+        commandLine += "\"";
 
         for (const string& argument : arguments) {
 
-            commandLine += " \"" + argument + "\"";
+            commandLine += " \"";
+            commandLine += argument;
+            commandLine += "\"";
         }
 
 
@@ -125,96 +149,7 @@ public:
 
 
         // ----------------------------------------------------
-        // 2. Create security attributes
-        // ----------------------------------------------------
-
-        SECURITY_ATTRIBUTES securityAttributes{};
-
-        securityAttributes.nLength =
-            sizeof(SECURITY_ATTRIBUTES);
-
-        securityAttributes.bInheritHandle = TRUE;
-
-        securityAttributes.lpSecurityDescriptor =
-            nullptr;
-
-
-        // ----------------------------------------------------
-        // 3. Create stdout pipe
-        // ----------------------------------------------------
-
-        HANDLE stdoutRead = nullptr;
-        HANDLE stdoutWrite = nullptr;
-
-        if (!CreatePipe(
-                &stdoutRead,
-                &stdoutWrite,
-                &securityAttributes,
-                0)) {
-
-            result.launchFailed = true;
-
-            return result;
-        }
-
-
-        // Parent should not inherit read handle
-
-        if (!SetHandleInformation(
-                stdoutRead,
-                HANDLE_FLAG_INHERIT,
-                0)) {
-
-            CloseHandle(stdoutRead);
-            CloseHandle(stdoutWrite);
-
-            result.launchFailed = true;
-
-            return result;
-        }
-
-
-        // ----------------------------------------------------
-        // 4. Create stderr pipe
-        // ----------------------------------------------------
-
-        HANDLE stderrRead = nullptr;
-        HANDLE stderrWrite = nullptr;
-
-        if (!CreatePipe(
-                &stderrRead,
-                &stderrWrite,
-                &securityAttributes,
-                0)) {
-
-            CloseHandle(stdoutRead);
-            CloseHandle(stdoutWrite);
-
-            result.launchFailed = true;
-
-            return result;
-        }
-
-
-        if (!SetHandleInformation(
-                stderrRead,
-                HANDLE_FLAG_INHERIT,
-                0)) {
-
-            CloseHandle(stdoutRead);
-            CloseHandle(stdoutWrite);
-
-            CloseHandle(stderrRead);
-            CloseHandle(stderrWrite);
-
-            result.launchFailed = true;
-
-            return result;
-        }
-
-
-        // ----------------------------------------------------
-        // 5. Configure process startup
+        // Startup information
         // ----------------------------------------------------
 
         STARTUPINFOA startupInfo{};
@@ -222,7 +157,7 @@ public:
         startupInfo.cb =
             sizeof(STARTUPINFOA);
 
-        startupInfo.dwFlags |=
+        startupInfo.dwFlags =
             STARTF_USESTDHANDLES;
 
         startupInfo.hStdOutput =
@@ -239,60 +174,34 @@ public:
 
 
         // ----------------------------------------------------
-        // 6. Start timer
+        // Start process
         // ----------------------------------------------------
 
-        auto startTime =
+        auto start =
             chrono::steady_clock::now();
 
 
-        // ----------------------------------------------------
-        // 7. Launch process
-        // ----------------------------------------------------
-
-        BOOL processCreated = CreateProcessA(
-
-            nullptr,
-
+        BOOL created = CreateProcessA(
+            NULL,
             commandBuffer.data(),
-
-            nullptr,
-
-            nullptr,
-
+            NULL,
+            NULL,
             TRUE,
-
             0,
-
-            nullptr,
-
-            nullptr,
-
+            NULL,
+            NULL,
             &startupInfo,
-
             &processInfo
         );
 
 
-        // Parent no longer needs write handles
+        // Parent no longer needs write handles.
 
         CloseHandle(stdoutWrite);
         CloseHandle(stderrWrite);
 
 
-        // ----------------------------------------------------
-        // 8. Handle launch failure
-        // ----------------------------------------------------
-
-        if (!processCreated) {
-
-            DWORD errorCode =
-                GetLastError();
-
-            cout << "Process launch failed.\n";
-            cout << "Windows error code: "
-                 << errorCode
-                 << "\n";
+        if (!created) {
 
             CloseHandle(stdoutRead);
             CloseHandle(stderrRead);
@@ -304,59 +213,242 @@ public:
 
 
         // ----------------------------------------------------
-        // 9. Wait for process
+        // Read output continuously
         // ----------------------------------------------------
 
-        DWORD timeoutMilliseconds =
-            static_cast<DWORD>(
-                timeoutSeconds * 1000
-            );
+        bool processFinished = false;
+
+        while (!processFinished) {
+
+            DWORD waitResult =
+                WaitForSingleObject(
+                    processInfo.hProcess,
+                    20
+                );
 
 
-        DWORD waitResult =
-            WaitForSingleObject(
-                processInfo.hProcess,
-                timeoutMilliseconds
-            );
+            char buffer[4096];
+
+            DWORD bytesAvailable = 0;
 
 
-        // ----------------------------------------------------
-        // 10. Handle timeout
-        // ----------------------------------------------------
+            // stdout
 
-        if (waitResult == WAIT_TIMEOUT) {
+            while (
+                PeekNamedPipe(
+                    stdoutRead,
+                    NULL,
+                    0,
+                    NULL,
+                    &bytesAvailable,
+                    NULL
+                ) &&
+                bytesAvailable > 0
+            ) {
 
-            result.timedOut = true;
+                DWORD bytesRead = 0;
 
-            cout << "Process timed out.\n";
+                if (ReadFile(
+                        stdoutRead,
+                        buffer,
+                        sizeof(buffer),
+                        &bytesRead,
+                        NULL
+                    ) &&
+                    bytesRead > 0
+                ) {
+
+                    result.stdoutOutput.append(
+                        buffer,
+                        bytesRead
+                    );
+                }
+                else {
+                    break;
+                }
+            }
 
 
-            // Terminate solver
+            // stderr
 
-            TerminateProcess(
-                processInfo.hProcess,
-                1
-            );
+            while (
+                PeekNamedPipe(
+                    stderrRead,
+                    NULL,
+                    0,
+                    NULL,
+                    &bytesAvailable,
+                    NULL
+                ) &&
+                bytesAvailable > 0
+            ) {
+
+                DWORD bytesRead = 0;
+
+                if (ReadFile(
+                        stderrRead,
+                        buffer,
+                        sizeof(buffer),
+                        &bytesRead,
+                        NULL
+                    ) &&
+                    bytesRead > 0
+                ) {
+
+                    result.stderrOutput.append(
+                        buffer,
+                        bytesRead
+                    );
+                }
+                else {
+                    break;
+                }
+            }
 
 
-            // Wait until process actually terminates
+            // ------------------------------------------------
+            // Check timeout
+            // ------------------------------------------------
 
-            WaitForSingleObject(
-                processInfo.hProcess,
-                INFINITE
-            );
+            auto now =
+                chrono::steady_clock::now();
+
+
+            auto elapsed =
+                chrono::duration_cast<
+                    chrono::milliseconds
+                >(
+                    now - start
+                );
+
+
+            if (
+                elapsed >= timeout &&
+                waitResult == WAIT_TIMEOUT
+            ) {
+
+                result.timedOut = true;
+
+
+                TerminateProcess(
+                    processInfo.hProcess,
+                    1
+                );
+
+
+                WaitForSingleObject(
+                    processInfo.hProcess,
+                    INFINITE
+                );
+
+
+                processFinished = true;
+            }
+
+
+            if (
+                waitResult == WAIT_OBJECT_0
+            ) {
+
+                processFinished = true;
+            }
         }
 
 
         // ----------------------------------------------------
-        // 11. Get exit code
+        // Read remaining output
+        // ----------------------------------------------------
+
+        char buffer[4096];
+
+        DWORD bytesAvailable = 0;
+
+
+        while (
+            PeekNamedPipe(
+                stdoutRead,
+                NULL,
+                0,
+                NULL,
+                &bytesAvailable,
+                NULL
+            ) &&
+            bytesAvailable > 0
+        ) {
+
+            DWORD bytesRead = 0;
+
+            if (
+                ReadFile(
+                    stdoutRead,
+                    buffer,
+                    sizeof(buffer),
+                    &bytesRead,
+                    NULL
+                ) &&
+                bytesRead > 0
+            ) {
+
+                result.stdoutOutput.append(
+                    buffer,
+                    bytesRead
+                );
+            }
+            else {
+                break;
+            }
+        }
+
+
+        while (
+            PeekNamedPipe(
+                stderrRead,
+                NULL,
+                0,
+                NULL,
+                &bytesAvailable,
+                NULL
+            ) &&
+            bytesAvailable > 0
+        ) {
+
+            DWORD bytesRead = 0;
+
+            if (
+                ReadFile(
+                    stderrRead,
+                    buffer,
+                    sizeof(buffer),
+                    &bytesRead,
+                    NULL
+                ) &&
+                bytesRead > 0
+            ) {
+
+                result.stderrOutput.append(
+                    buffer,
+                    bytesRead
+                );
+            }
+            else {
+                break;
+            }
+        }
+
+
+        // ----------------------------------------------------
+        // Get exit code
         // ----------------------------------------------------
 
         DWORD exitCode = 0;
 
-        if (GetExitCodeProcess(
-                processInfo.hProcess,
-                &exitCode)) {
+        GetExitCodeProcess(
+            processInfo.hProcess,
+            &exitCode
+        );
+
+
+        if (!result.timedOut) {
 
             result.exitCode =
                 static_cast<int>(exitCode);
@@ -364,39 +456,20 @@ public:
 
 
         // ----------------------------------------------------
-        // 12. Stop timer
+        // Runtime
         // ----------------------------------------------------
 
-        auto endTime =
-            chrono::steady_clock::now();
-
-
-        chrono::duration<double> elapsed =
-            endTime - startTime;
-
-
-        result.runtimeSeconds =
-            elapsed.count();
+        result.runtime =
+            chrono::duration_cast<
+                chrono::milliseconds
+            >(
+                chrono::steady_clock::now()
+                - start
+            );
 
 
         // ----------------------------------------------------
-        // 13. Capture stdout
-        // ----------------------------------------------------
-
-        result.stdoutText =
-            readPipe(stdoutRead);
-
-
-        // ----------------------------------------------------
-        // 14. Capture stderr
-        // ----------------------------------------------------
-
-        result.stderrText =
-            readPipe(stderrRead);
-
-
-        // ----------------------------------------------------
-        // 15. Cleanup
+        // Cleanup
         // ----------------------------------------------------
 
         CloseHandle(stdoutRead);
@@ -412,101 +485,422 @@ public:
 
 
 // ============================================================
-// TEST
+// MACOS / LINUX IMPLEMENTATION
 // ============================================================
 
-int main() {
+#else
 
-    cout << "=================================\n";
-    cout << "      BENCHMARK PROCESS TEST\n";
-    cout << "=================================\n\n";
+class ProcessManager {
 
+public:
 
-    ProcessManager processManager;
+    ProcessResult run(
+        const string& executable,
+        const vector<string>& arguments,
+        chrono::milliseconds timeout
+    ) {
 
+        ProcessResult result;
 
-    // --------------------------------------------------------
-    // Temporary test executable
-    // --------------------------------------------------------
-    //
-    // We don't have our actual solver yet.
-    // Therefore we use Windows CMD as a temporary process.
-    //
-    // Later this will become:
-    //
-    // solver.exe + instance.mps
-    //
-    // --------------------------------------------------------
-
-    string executable =
-        "C:\\Windows\\System32\\cmd.exe";
+        int stdoutPipe[2];
+        int stderrPipe[2];
 
 
-    vector<string> arguments = {
+        // ----------------------------------------------------
+        // Create pipes
+        // ----------------------------------------------------
 
-        "/C",
+        if (pipe(stdoutPipe) == -1) {
 
-        "echo Benchmark process started"
-    };
-
-
-    int timeoutSeconds = 10;
+            result.launchFailed = true;
+            return result;
+        }
 
 
-    // --------------------------------------------------------
-    // Run process
-    // --------------------------------------------------------
+        if (pipe(stderrPipe) == -1) {
 
-    ProcessResult result =
-        processManager.run(
-            executable,
-            arguments,
-            timeoutSeconds
+            close(stdoutPipe[0]);
+            close(stdoutPipe[1]);
+
+            result.launchFailed = true;
+            return result;
+        }
+
+
+        // ----------------------------------------------------
+        // Fork
+        // ----------------------------------------------------
+
+        pid_t pid = fork();
+
+
+        if (pid == -1) {
+
+            close(stdoutPipe[0]);
+            close(stdoutPipe[1]);
+
+            close(stderrPipe[0]);
+            close(stderrPipe[1]);
+
+            result.launchFailed = true;
+
+            return result;
+        }
+
+
+        // ----------------------------------------------------
+        // Child
+        // ----------------------------------------------------
+
+        if (pid == 0) {
+
+            close(stdoutPipe[0]);
+            close(stderrPipe[0]);
+
+
+            dup2(
+                stdoutPipe[1],
+                STDOUT_FILENO
+            );
+
+            dup2(
+                stderrPipe[1],
+                STDERR_FILENO
+            );
+
+
+            close(stdoutPipe[1]);
+            close(stderrPipe[1]);
+
+
+            vector<char*> argv;
+
+            argv.push_back(
+                const_cast<char*>(
+                    executable.c_str()
+                )
+            );
+
+
+            for (const string& argument : arguments) {
+
+                argv.push_back(
+                    const_cast<char*>(
+                        argument.c_str()
+                    )
+                );
+            }
+
+
+            argv.push_back(nullptr);
+
+
+            execvp(
+                executable.c_str(),
+                argv.data()
+            );
+
+
+            // exec failed
+
+            _exit(127);
+        }
+
+
+        // ----------------------------------------------------
+        // Parent
+        // ----------------------------------------------------
+
+        close(stdoutPipe[1]);
+        close(stderrPipe[1]);
+
+
+        // Make pipes non-blocking
+
+        int stdoutFlags =
+            fcntl(
+                stdoutPipe[0],
+                F_GETFL,
+                0
+            );
+
+        int stderrFlags =
+            fcntl(
+                stderrPipe[0],
+                F_GETFL,
+                0
+            );
+
+
+        fcntl(
+            stdoutPipe[0],
+            F_SETFL,
+            stdoutFlags | O_NONBLOCK
         );
 
 
-    // --------------------------------------------------------
-    // Display result
-    // --------------------------------------------------------
-
-    cout << "\n=================================\n";
-    cout << "          PROCESS RESULT\n";
-    cout << "=================================\n";
+        fcntl(
+            stderrPipe[0],
+            F_SETFL,
+            stderrFlags | O_NONBLOCK
+        );
 
 
-    cout << "Launch failed : "
-         << boolalpha
-         << result.launchFailed
-         << "\n";
+        // ----------------------------------------------------
+        // Start timer
+        // ----------------------------------------------------
+
+        auto start =
+            chrono::steady_clock::now();
 
 
-    cout << "Timed out     : "
-         << result.timedOut
-         << "\n";
+        bool processFinished = false;
+
+        int waitStatus = 0;
 
 
-    cout << "Exit code     : "
-         << result.exitCode
-         << "\n";
+        // ----------------------------------------------------
+        // Monitor process
+        // ----------------------------------------------------
+
+        while (!processFinished) {
+
+            pollfd descriptors[2];
 
 
-    cout << "Runtime       : "
-         << result.runtimeSeconds
-         << " seconds\n";
+            descriptors[0].fd =
+                stdoutPipe[0];
+
+            descriptors[0].events =
+                POLLIN;
 
 
-    cout << "\n------------ STDOUT ------------\n";
+            descriptors[1].fd =
+                stderrPipe[0];
 
-    cout << result.stdoutText;
-
-
-    cout << "\n------------ STDERR ------------\n";
-
-    cout << result.stderrText;
+            descriptors[1].events =
+                POLLIN;
 
 
-    cout << "\n=================================\n";
+            poll(
+                descriptors,
+                2,
+                20
+            );
 
 
-    return 0;
-}
+            char buffer[4096];
+
+
+            // ------------------------------------------------
+            // stdout
+            // ------------------------------------------------
+
+            while (true) {
+
+                ssize_t bytesRead =
+                    read(
+                        stdoutPipe[0],
+                        buffer,
+                        sizeof(buffer)
+                    );
+
+
+                if (bytesRead > 0) {
+
+                    result.stdoutOutput.append(
+                        buffer,
+                        bytesRead
+                    );
+                }
+
+                else {
+                    break;
+                }
+            }
+
+
+            // ------------------------------------------------
+            // stderr
+            // ------------------------------------------------
+
+            while (true) {
+
+                ssize_t bytesRead =
+                    read(
+                        stderrPipe[0],
+                        buffer,
+                        sizeof(buffer)
+                    );
+
+
+                if (bytesRead > 0) {
+
+                    result.stderrOutput.append(
+                        buffer,
+                        bytesRead
+                    );
+                }
+
+                else {
+                    break;
+                }
+            }
+
+
+            // ------------------------------------------------
+            // Check process
+            // ------------------------------------------------
+
+            pid_t waitResult =
+                waitpid(
+                    pid,
+                    &waitStatus,
+                    WNOHANG
+                );
+
+
+            if (waitResult == pid) {
+
+                processFinished = true;
+            }
+
+
+            // ------------------------------------------------
+            // Timeout
+            // ------------------------------------------------
+
+            auto elapsed =
+                chrono::duration_cast<
+                    chrono::milliseconds
+                >(
+                    chrono::steady_clock::now()
+                    - start
+                );
+
+
+            if (
+                !processFinished &&
+                elapsed >= timeout
+            ) {
+
+                result.timedOut = true;
+
+
+                kill(
+                    pid,
+                    SIGKILL
+                );
+
+
+                waitpid(
+                    pid,
+                    &waitStatus,
+                    0
+                );
+
+
+                processFinished = true;
+            }
+        }
+
+
+        // ----------------------------------------------------
+        // Read remaining output
+        // ----------------------------------------------------
+
+        char buffer[4096];
+
+
+        while (true) {
+
+            ssize_t bytesRead =
+                read(
+                    stdoutPipe[0],
+                    buffer,
+                    sizeof(buffer)
+                );
+
+
+            if (bytesRead > 0) {
+
+                result.stdoutOutput.append(
+                    buffer,
+                    bytesRead
+                );
+            }
+
+            else {
+                break;
+            }
+        }
+
+
+        while (true) {
+
+            ssize_t bytesRead =
+                read(
+                    stderrPipe[0],
+                    buffer,
+                    sizeof(buffer)
+                );
+
+
+            if (bytesRead > 0) {
+
+                result.stderrOutput.append(
+                    buffer,
+                    bytesRead
+                );
+            }
+
+            else {
+                break;
+            }
+        }
+
+
+        close(stdoutPipe[0]);
+        close(stderrPipe[0]);
+
+
+        // ----------------------------------------------------
+        // Exit code
+        // ----------------------------------------------------
+
+        if (!result.timedOut) {
+
+            if (WIFEXITED(waitStatus)) {
+
+                result.exitCode =
+                    WEXITSTATUS(waitStatus);
+            }
+
+            else if (WIFSIGNALED(waitStatus)) {
+
+                result.exitCode =
+                    128 + WTERMSIG(waitStatus);
+            }
+        }
+
+
+        // ----------------------------------------------------
+        // Runtime
+        // ----------------------------------------------------
+
+        result.runtime =
+            chrono::duration_cast<
+                chrono::milliseconds
+            >(
+                chrono::steady_clock::now()
+                - start
+            );
+
+
+        return result;
+    }
+};
+
+#endif
+
+} // namespace benchmark
