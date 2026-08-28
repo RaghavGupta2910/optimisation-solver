@@ -1,4 +1,4 @@
-#include "benchmark/BenchmarkResult.h"
+#include "benchmark/benchmarkresult.h"
 
 // This file is intentionally minimal.
 //
