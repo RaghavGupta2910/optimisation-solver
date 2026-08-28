@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include "benchmark/BenchmarkResult.h"
+#include "benchmark/benchmarkresult.h"
 
 using namespace std;
 
