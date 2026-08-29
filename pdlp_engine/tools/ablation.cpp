@@ -83,13 +83,6 @@ struct Configuration {
     int andersonDepth = 5;
 };
 
-double kkt(const pdlp::PdlpResult& result) {
-    return std::max(
-        std::max(result.primalResidual, result.dualResidual),
-        result.relativeGap
-    );
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {

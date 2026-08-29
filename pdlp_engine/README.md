@@ -1,6 +1,6 @@
 # PDLP CPU Engine v1
 
-A self-contained C++20 primal-dual hybrid gradient (PDHG) engine for continuous
+A self-contained C++17 primal-dual hybrid gradient (PDHG) engine for continuous
 linear programs in the form
 
 ```text
@@ -49,7 +49,7 @@ the solver being slow.
 Without CMake:
 
 ```bash
-g++ -std=c++20 -O3 -pthread -I include src/*.cpp tests/test_pdlp.cpp -o pdlp_tests
+g++ -std=c++17 -O3 -pthread -I include src/*.cpp tests/test_pdlp.cpp -o pdlp_tests
 ./pdlp_tests
 ```
 
