@@ -5,6 +5,7 @@ project(Optimisation_solver)
 add_executable(bench
     src/main.cpp
     src/model/model.cpp
+    src/benchmark/benchmarkresult.cpp
     src/presolve/presolver.cpp
 )
 

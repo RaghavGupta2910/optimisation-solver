@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include "benchmark/benchmarkresult.h"
 
 using namespace std;
 
@@ -1088,5 +1089,31 @@ ProcessResult ProcessManager::run(
 }
 
 #endif
+
+// ============================================================
+// runBenchmark
+//
+// Convenience wrapper: runs the solver via ProcessManager and
+// immediately converts the raw ProcessResult into a structured
+// BenchmarkResult. Does not do any solver-specific parsing.
+// ============================================================
+
+inline BenchmarkResult runBenchmark(
+    ProcessManager& manager,
+    const string& solverName,
+    const string& instanceName,
+    const string& executable,
+    const vector<string>& arguments,
+    chrono::milliseconds timeout
+) {
+    ProcessResult processResult =
+        manager.run(executable, arguments, timeout);
+
+    return buildBenchmarkResult(
+        solverName,
+        instanceName,
+        processResult
+    );
+}
 
 } // namespace benchmark
