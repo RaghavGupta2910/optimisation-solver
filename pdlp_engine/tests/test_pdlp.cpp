@@ -403,33 +403,38 @@ void testInvalidProblemIsRejected() {
 void testTimeLimitIsHonoured() {
     std::mt19937 generator(3);
     std::uniform_real_distribution<double> value(-1.0, 1.0);
-    std::uniform_int_distribution<int> pick(0, 999);
+    std::uniform_int_distribution<int> pick(0, 3999);
 
     std::vector<pdlp::MatrixTriplet> triplets;
-    for (int row = 0; row < 800; ++row) {
-        for (int k = 0; k < 8; ++k) {
+    for (int row = 0; row < 3000; ++row) {
+        for (int k = 0; k < 12; ++k) {
             triplets.push_back({row, pick(generator), value(generator)});
         }
     }
 
     pdlp::CompiledLp problem;
-    problem.matrix = pdlp::SparseMatrix::fromTriplets(800, 1000, triplets);
-    problem.objective.assign(1000, 1.0);
-    problem.rowLower.assign(800, -1.0);
-    problem.rowUpper.assign(800, 1.0);
-    problem.variableLower.assign(1000, -1.0);
-    problem.variableUpper.assign(1000, 1.0);
+    problem.matrix = pdlp::SparseMatrix::fromTriplets(3000, 4000, triplets);
+    problem.objective.assign(4000, 1.0);
+    problem.rowLower.assign(3000, -1.0);
+    problem.rowUpper.assign(3000, 1.0);
+    problem.variableLower.assign(4000, -1.0);
+    problem.variableUpper.assign(4000, 1.0);
 
     pdlp::PdlpOptions options;
     options.iterationLimit = 100000000;
-    options.primalTolerance = 1e-14;
-    options.dualTolerance = 1e-14;
-    options.gapTolerance = 1e-14;
+    // A relative gap of exactly zero requires the primal and dual objectives to
+    // agree bit for bit, so the solve cannot terminate early and the time limit
+    // is the only way out. Asserting against a merely tiny tolerance made this
+    // test flaky: the solver became fast enough to sometimes reach it first.
+    options.primalTolerance = 0.0;
+    options.dualTolerance = 0.0;
+    options.gapTolerance = 0.0;
     options.timeLimitSeconds = 0.25;
 
     const auto result = pdlp::PdlpSolver{}.solve(problem, options);
     require(result.status == pdlp::PdlpStatus::TimeLimit,
-            "solver should stop at the time limit");
+            "solver should stop at the time limit, got " +
+            std::string(pdlp::toString(result.status)));
     // Generous ceiling: polishing must also respect the remaining budget.
     require(result.solveTimeSeconds < 3.0,
             "time limit overshot: " + std::to_string(result.solveTimeSeconds));
@@ -572,7 +577,6 @@ void testStepPoliciesAgreeOnTheOptimum() {
 
     auto fixed = convergenceOptions();
     fixed.useAdaptiveLinesearch = false;
-    fixed.useAdaptiveSteps = false;
     const auto staticStep = pdlp::PdlpSolver{}.solve(problem, fixed);
     require(staticStep.status == pdlp::PdlpStatus::Optimal,
             "fixed step should solve the reference problem");
@@ -580,49 +584,6 @@ void testStepPoliciesAgreeOnTheOptimum() {
     const double scale = 1.0 + std::abs(adaptive.primalObjective);
     requireNear(staticStep.primalObjective, adaptive.primalObjective, 1e-6 * scale,
                 "fixed and adaptive step objectives");
-}
-
-// Halpern is off by default because it measured slower, but it must still be
-// correct: it is a supported option.
-void testHalpernIsCorrectWhenEnabled() {
-    const auto problem = randomFeasibleProblem(240, 340, 44u);
-
-    auto plain = convergenceOptions();
-    const auto baseline = pdlp::PdlpSolver{}.solve(problem, plain);
-    require(baseline.status == pdlp::PdlpStatus::Optimal, "baseline should solve");
-
-    auto halpern = convergenceOptions();
-    halpern.useHalpern = true;
-    const auto accelerated = pdlp::PdlpSolver{}.solve(problem, halpern);
-    require(accelerated.status == pdlp::PdlpStatus::Optimal,
-            "Halpern should still reach the tolerance");
-
-    const double scale = 1.0 + std::abs(baseline.primalObjective);
-    requireNear(accelerated.primalObjective, baseline.primalObjective, 1e-6 * scale,
-                "Halpern objective");
-}
-
-// Same for Anderson: the safeguard must never let it return a worse answer.
-void testAndersonIsCorrectWhenEnabled() {
-    const auto problem = randomFeasibleProblem(240, 340, 55u);
-
-    auto plain = convergenceOptions();
-    const auto baseline = pdlp::PdlpSolver{}.solve(problem, plain);
-    require(baseline.status == pdlp::PdlpStatus::Optimal, "baseline should solve");
-
-    auto anderson = convergenceOptions();
-    anderson.useAnderson = true;
-    const auto accelerated = pdlp::PdlpSolver{}.solve(problem, anderson);
-    require(accelerated.status == pdlp::PdlpStatus::Optimal,
-            "Anderson should still reach the tolerance");
-
-    // Each accepted iteration also pays for the safeguard's evaluation of T.
-    require(accelerated.stepTrials > accelerated.iterations,
-            "the Anderson safeguard should cost extra matrix passes");
-
-    const double scale = 1.0 + std::abs(baseline.primalObjective);
-    requireNear(accelerated.primalObjective, baseline.primalObjective, 1e-6 * scale,
-                "Anderson objective");
 }
 
 void run(const char* name, void (*test)()) {
@@ -661,8 +622,6 @@ int main() {
 
     run("linesearchExceedsStaticBound", testLinesearchExceedsStaticBound);
     run("stepPoliciesAgreeOnTheOptimum", testStepPoliciesAgreeOnTheOptimum);
-    run("halpernIsCorrectWhenEnabled", testHalpernIsCorrectWhenEnabled);
-    run("andersonIsCorrectWhenEnabled", testAndersonIsCorrectWhenEnabled);
 
     if (failures == 0) {
         std::cout << "All PDLP tests passed\n";

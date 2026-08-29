@@ -56,27 +56,10 @@ public:
         const StepParameters& steps
     );
 
-    // Installs the most recent trial. Only valid immediately after trial().
-    //
-    // With an anchor, applies the Halpern step instead of the plain PDHG step:
-    //
-    //   z^{k+1} = lambda * T(z^k) + (1 - lambda) * z^anchor
-    //
-    // Ordinary heavy-ball or Nesterov momentum destabilises the coupled
-    // primal-dual system; the Halpern pull toward a fixed anchor is
-    // non-expansive, so it composes with PDHG without breaking the fixed-point
-    // structure. A*x^{k+1} follows by linearity from the anchor's activity and
-    // the trial's, so the blend costs no extra sparse product.
-    void commit(
-        PdlpState& state,
-        const HalpernAnchor* anchor = nullptr,
-        double lambda = 1.0
-    );
+    // Installs the most recent trial by swapping buffers, never by copying.
+    // Only valid immediately after trial().
+    void commit(PdlpState& state);
 
-    // The most recent trial, T(z). Valid until the next trial() or commit().
-    [[nodiscard]] const std::vector<double>& trialPrimal() const noexcept { return primalTrial_; }
-    [[nodiscard]] const std::vector<double>& trialDual() const noexcept { return dualTrial_; }
-    [[nodiscard]] const std::vector<double>& trialActivity() const noexcept { return activityTrial_; }
 
 private:
     struct alignas(64) PartialReduction {

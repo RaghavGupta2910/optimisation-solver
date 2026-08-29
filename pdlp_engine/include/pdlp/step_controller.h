@@ -4,7 +4,6 @@
 #include "pdlp/pdlp_state.h"
 
 #include <cstdint>
-#include <limits>
 
 namespace pdlp {
 
@@ -41,9 +40,6 @@ public:
         std::int64_t iteration
     ) noexcept;
 
-    // Fallback policy used when the linesearch is disabled: a bounded ratchet on
-    // the observed KKT score, never exceeding the static safety bound.
-    void observeProgress(double kktScore);
 
     void setPrimalWeight(double weight) noexcept;
 
@@ -57,7 +53,6 @@ public:
 private:
     PdlpOptions options_;
     StepParameters parameters_;
-    double previousScore_ = std::numeric_limits<double>::infinity();
 };
 
 }  // namespace pdlp

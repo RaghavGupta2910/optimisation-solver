@@ -142,80 +142,22 @@ on principle.
 
 ## Measured negatives
 
-Recorded so they are not re-attempted without new evidence. Both remain
-implemented behind default-off options.
+Two accelerations were implemented, benchmarked and then **removed**. The numbers
+are kept here so nobody spends the effort again without new evidence; the code is
+gone because carrying two permanently disabled schemes is dead weight.
 
-**Halpern acceleration** (`useHalpern`), `z^{k+1} = lambda_k T(z^k) + (1-lambda_k) z^anchor`
-with `lambda_k = (k+1)/(k+2)` from the last restart. Slower than the plain step
-in every regime tested: 10800 passes against 9007 on the 20-instance family, and
-worse at every restart frequency from none at all through a 5000-iteration floor,
-with and without averaging, and with a fixed step as well as the linesearch. The
-published gains for restarted Halpern PDHG are against averaged PDHG under a
-restart criterion built on the fixed-point residual; this engine restarts on the
-KKT score and already restarts often, which is the most likely explanation. Worth
-retesting if the restart criterion changes.
+**Halpern acceleration.** `z^{k+1} = lambda_k T(z^k) + (1-lambda_k) z^anchor`
+with `lambda_k = (k+1)/(k+2)` counted from the last restart. Slower than the
+plain step in every regime tried: 10800 matrix passes against 9007 for the
+baseline, and worse at every restart frequency from none at all through a
+5000-iteration floor, with and without averaging, and on a fixed step as well as
+the linesearch. Published gains for restarted Halpern PDHG are measured against
+*averaged* PDHG under a restart rule built on the fixed-point residual; this
+engine restarts on the KKT score and restarts often, which is the likeliest
+explanation. Worth revisiting only if the restart criterion changes.
 
-## Numerical convention
-
-Saddle-point sign convention `stationarity = c + A^T y`. For an equality row
-`A*x = b` the dual update is `y_next = y + sigma * (A*x_bar - b)`. Changing one
-sign without changing the other is a solver bug.
-
-The dual proximal step applies the Moreau identity for the support function of
-`[l, u]`, written as
-
-```text
-y_next = max(v - sigma*u, 0) + min(v - sigma*l, 0)
-```
-
-which is exact on all three cases including equality rows and infinite bounds.
-It returns exactly `0.0` on an inactive row, where the equivalent
-`v - sigma*clip(v/sigma, l, u)` leaves rounding residue that accumulates into
-the dual objective.
-
-## Equilibration and the termination contract
-
-Ruiz equilibration runs before the solve. The iteration runs on the equilibrated
-problem; **termination is always evaluated on the original problem**, so the
-tolerances a caller asks for are the tolerances they get, and the returned
-primal and dual vectors are in the caller's coordinates.
-
-This matters more than it sounds. Residuals are normalised by global norms, so
-on a matrix whose entries span several orders of magnitude the large rows inflate
-the normaliser until the small rows' violations disappear below tolerance. On a
-test instance with entries from 5e-4 to 1e3, the unequilibrated engine reported a
-relative primal residual of 2.7e-6 — apparent convergence — for a point whose
-worst absolute constraint violation was 0.08, and whose objective was 0.8% below
-the true optimum because it was infeasible. Equilibration removes that failure
-mode; `testIllConditionedProblem` guards it by asserting absolute feasibility.
-
-The dual objective is a genuine bound. Reduced costs that cannot be bounded
-below over the variable box, and dual values outside the domain of the row
-support function, are projected onto the dual-feasible cone and the projection
-distance is reported as dual infeasibility. An earlier formulation discarded
-reduced costs below a tolerance, which produced a "bound" that was not one.
-
-## Validation
-
-`tools/validate_against_reference.cpp` generates LP families (equality-heavy,
-ill-conditioned, free-variable) and writes each instance plus this engine's
-answer to disk. `tools/reference_check.py` re-solves them with HiGHS through
-`scipy.optimize.milp` and compares objectives.
-
-Current status on that family: agreement with HiGHS to 7e-6 relative on
-well-conditioned instances, worst case 3.3e-3 on the ill-conditioned ones, where
-the engine correctly reports `iteration_limit` rather than claiming optimality.
-
-The unit tests cover CSR/CSC adjoint consistency, unsorted and cancelling
-triplets, empty rows and columns, serial/parallel product equality, equality,
-one-sided and ranged rows, exact-zero duals on inactive rows, an ill-conditioned
-instance checked for absolute feasibility, a degenerate instance, rejection of
-invalid problems, time-limit compliance, and thread-count independence. The
-suite is clean under ThreadSanitizer, AddressSanitizer and UndefinedBehaviorSanitizer.
-
-**Safeguarded Anderson acceleration** (`useAnderson`), type-II on the PDHG
-fixed-point map with a Cholesky solve of the regularised normal equations and a
-residual safeguard.
+**Safeguarded Anderson acceleration.** Type-II on the PDHG fixed-point map, with
+a Cholesky solve of the regularised normal equations and a residual safeguard.
 
 | Configuration | Matrix passes | Solved | Wall time |
 |---|---|---|---|
@@ -224,16 +166,19 @@ residual safeguard.
 | fixed step + Anderson, depth 5 | 12089 | 9/20 | 39.1 s |
 | linesearch + Anderson, depth 5 | 17926 | 10/20 | 41.2 s |
 
-The mechanism works where its assumptions hold. Anderson presumes a fixed
-operator `T`; against a fixed step, where that is true, depth 5 cuts matrix
-passes by 1.26x, which is evidence the implementation is sound rather than
-merely inert. It still loses on all three counts that matter. It cannot approach
-the linesearch (12089 against 8631), and combined with the linesearch it is worse
-than either alone, because an adaptive step changes `T` every iteration and the
-history then mixes samples from different operators. Wall time is eight times the
-baseline: the safeguard costs an extra pass over the matrix per iteration, and
-the history dot products are O(depth * (n + m)) on top of that.
+The mechanism does work where its assumptions hold: against a fixed step, where
+the operator is genuinely constant, depth 5 cut matrix passes by 1.26x. It still
+lost on every count that matters. It never approached the linesearch, and
+combined with the linesearch it was worse than either alone, because an adaptive
+step changes the operator every iteration and the history then mixes samples from
+different operators. Wall time was eight times the baseline: the safeguard costs
+an extra pass over the matrix per iteration, and the history dot products are
+O(depth * (n + m)) on top of that.
 
+**The bounded step ratchet** that predated the linesearch was not merely
+conservative but actively harmful, driving the step down to about 1% of the
+static bound and converging on nothing (0/20). It has been removed rather than
+kept as a fallback option.
 
 ## Known limitations
 
@@ -271,9 +216,6 @@ commercial solver.
    halves are coordinate-parallel with a single barrier between them, which maps
    onto two CUDA kernels, and the linesearch's reductions are the only device
    synchronisation points per iteration. Nothing here targets a GPU yet.
-
-7. **Anderson and Halpern are implemented but off.** See "Measured negatives".
-   Both cost nothing when disabled.
 
 ## Integration boundary
 

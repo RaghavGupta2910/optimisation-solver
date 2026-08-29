@@ -67,33 +67,6 @@ bool StepController::evaluateTrial(
     return accepted;
 }
 
-void StepController::observeProgress(double kktScore) {
-    if (options_.useAdaptiveLinesearch || !options_.useAdaptiveSteps ||
-        !std::isfinite(kktScore)) {
-        previousScore_ = kktScore;
-        return;
-    }
-
-    // The score observed here must be the current iterate's, not the best seen
-    // so far: a best-so-far score is monotonically non-increasing, which makes
-    // the backoff branch unreachable and turns the controller into a one-way
-    // ratchet up to the safety cap.
-    if (std::isfinite(previousScore_)) {
-        if (kktScore <= 0.70 * previousScore_) {
-            parameters_.globalStep *= 1.02;
-        } else if (kktScore > 1.05 * previousScore_) {
-            parameters_.globalStep *= 0.70;
-        }
-    }
-
-    parameters_.globalStep = std::clamp(
-        parameters_.globalStep,
-        options_.minimumStepScale * parameters_.maximumSafeGlobalStep,
-        parameters_.maximumSafeGlobalStep
-    );
-    previousScore_ = kktScore;
-}
-
 void StepController::setPrimalWeight(double weight) noexcept {
     if (weight > 0.0 && std::isfinite(weight)) {
         parameters_.primalWeight = std::clamp(

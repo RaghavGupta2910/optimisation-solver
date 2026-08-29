@@ -16,3 +16,7 @@ add_executable(bench
 target_include_directories(bench PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
+# Linear programming engine. Self-contained and C++17; builds the library only.
+# Its tests and benchmark harnesses stay off here and are enabled by configuring
+# pdlp_engine/ standalone, or with -DPDLP_BUILD_TESTS=ON -DPDLP_BUILD_TOOLS=ON.
+add_subdirectory(pdlp_engine)

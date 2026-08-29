@@ -276,70 +276,10 @@ KernelTrialResult CpuPdhgKernel::trial(
     return result;
 }
 
-namespace {
-
-inline void blendRange(
-    double* __restrict target,
-    const double* __restrict trial,
-    const double* __restrict anchor,
-    double lambda,
-    double complement,
-    int begin,
-    int end
-) noexcept {
-    for (int i = begin; i < end; ++i) {
-        target[i] = lambda * trial[i] + complement * anchor[i];
-    }
-}
-
-}  // namespace
-
-void CpuPdhgKernel::commit(
-    PdlpState& state,
-    const HalpernAnchor* anchor,
-    double lambda
-) {
-    if (anchor == nullptr || lambda >= 1.0) {
-        state.primal.swap(primalTrial_);
-        state.dual.swap(dualTrial_);
-        state.rowActivity.swap(activityTrial_);
-        ++state.iteration;
-        return;
-    }
-
-    const double complement = 1.0 - lambda;
-    const int columns = problem_.numColumns();
-    const int rows = problem_.numRows();
-
-    double* const primal = state.primal.data();
-    double* const dual = state.dual.data();
-    double* const activity = state.rowActivity.data();
-    const double* const trialPrimal = primalTrial_.data();
-    const double* const trialDual = dualTrial_.data();
-    const double* const trialActivity = activityTrial_.data();
-    const double* const anchorPrimal = anchor->primal.data();
-    const double* const anchorDual = anchor->dual.data();
-    const double* const anchorActivity = anchor->rowActivity.data();
-
-    if (parts_ <= 1) {
-        blendRange(primal, trialPrimal, anchorPrimal, lambda, complement, 0, columns);
-        blendRange(dual, trialDual, anchorDual, lambda, complement, 0, rows);
-        blendRange(activity, trialActivity, anchorActivity, lambda, complement, 0, rows);
-    } else {
-        const int parts = parts_;
-        executor_->run([&](int part) {
-            const Range columnRange = evenRange(columns, parts, part);
-            blendRange(
-                primal, trialPrimal, anchorPrimal, lambda, complement,
-                static_cast<int>(columnRange.begin), static_cast<int>(columnRange.end)
-            );
-            const Range rowRange = evenRange(rows, parts, part);
-            const int begin = static_cast<int>(rowRange.begin);
-            const int end = static_cast<int>(rowRange.end);
-            blendRange(dual, trialDual, anchorDual, lambda, complement, begin, end);
-            blendRange(activity, trialActivity, anchorActivity, lambda, complement, begin, end);
-        });
-    }
+void CpuPdhgKernel::commit(PdlpState& state) {
+    state.primal.swap(primalTrial_);
+    state.dual.swap(dualTrial_);
+    state.rowActivity.swap(activityTrial_);
     ++state.iteration;
 }
 

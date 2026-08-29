@@ -34,25 +34,12 @@ struct PdlpOptions {
 
     bool useDiagonalPreconditioning = true;
 
-    // PDLP adaptive linesearch. When enabled the step size is free to exceed the
-    // static Pock-Chambolle bound, which is the single largest reduction in
-    // iteration count available; the static bound is used only to initialise it.
-    // useAdaptiveSteps selects the older bounded ratchet and applies only when
-    // the linesearch is off.
-    // Halpern acceleration: z^{k+1} = lambda_k T(z^k) + (1-lambda_k) z^anchor,
-    // with lambda_k = (k+1)/(k+2) counted from the last restart. The anchor pull
-    // decays as the cycle proceeds, and each restart re-anchors.
-    bool useHalpern = false;
-
-    // Safeguarded Anderson acceleration on the PDHG fixed-point map. The
-    // safeguard costs one extra matrix pass per iteration, and the method
-    // assumes a fixed operator T, which an adaptive step size violates.
-    bool useAnderson = false;
-    int andersonDepth = 5;
-
+    // PDLP adaptive linesearch. The step size is free to exceed the static
+    // Pock-Chambolle bound, which is the single largest reduction in iteration
+    // count available; the static bound is used only to initialise it. Turning
+    // this off pins the step at that bound.
     bool useAdaptiveLinesearch = true;
     int maximumStepTrials = 60;
-    bool useAdaptiveSteps = true;
     bool useAveraging = true;
     bool useRestarts = true;
     bool useFeasibilityPolishing = true;

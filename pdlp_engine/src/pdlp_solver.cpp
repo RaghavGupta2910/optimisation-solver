@@ -1,6 +1,5 @@
 #include "pdlp/pdlp_solver.h"
 
-#include "pdlp/anderson.h"
 #include "pdlp/feasibility_polishing.h"
 #include "pdlp/iterate_average.h"
 #include "pdlp/parallel.h"
@@ -94,7 +93,6 @@ const char* toString(PdlpStatus status) noexcept {
         case PdlpStatus::Optimal: return "optimal";
         case PdlpStatus::IterationLimit: return "iteration_limit";
         case PdlpStatus::TimeLimit: return "time_limit";
-        case PdlpStatus::Interrupted: return "interrupted";
         case PdlpStatus::NumericalFailure: return "numerical_failure";
         case PdlpStatus::InvalidProblem: return "invalid_problem";
     }
@@ -232,21 +230,6 @@ PdlpResult PdlpSolver::solve(
     std::vector<double> restartDual = state.dual;
     std::int64_t stepTrials = 0;
 
-    AndersonAccelerator accelerator(columns, rows, options.andersonDepth);
-    std::vector<double> andersonPrimal;
-    std::vector<double> andersonDual;
-    std::vector<double> andersonActivity;
-    std::vector<double> savedPrimal;
-    std::vector<double> savedDual;
-    std::vector<double> savedActivity;
-
-    HalpernAnchor anchor;
-    if (options.useHalpern) {
-        anchor.primal = state.primal;
-        anchor.dual = state.dual;
-        anchor.rowActivity = state.rowActivity;
-    }
-    const HalpernAnchor* const anchorPointer = options.useHalpern ? &anchor : nullptr;
 
     if (checker.isOptimal(currentMetrics)) {
         return makeResult(
@@ -287,7 +270,6 @@ PdlpResult PdlpSolver::solve(
         // curvature rather than of the current step, so the loop converges in a
         // trial or two rather than by repeated halving.
         bool committed = false;
-        double plainMovement = 0.0;
         for (int attempt = 0; attempt < std::max(options.maximumStepTrials, 1); ++attempt) {
             const KernelTrialResult trialResult = kernel.trial(
                 state,
@@ -308,10 +290,6 @@ PdlpResult PdlpSolver::solve(
                 ));
             }
 
-            // lambda_k = (k+1)/(k+2) with k counted from the last restart.
-            const double sinceRestart = static_cast<double>(iterationsSinceRestart);
-            const double lambda = (sinceRestart + 1.0) / (sinceRestart + 2.0);
-
             const bool accept = !options.useAdaptiveLinesearch ||
                 stepController.evaluateTrial(
                     trialResult.primalMovementWeighted,
@@ -320,18 +298,7 @@ PdlpResult PdlpSolver::solve(
                     state.iteration
                 );
             if (accept) {
-                if (options.useAnderson) {
-                    // Must be recorded before commit(), which swaps the trial
-                    // buffers out from under us.
-                    accelerator.record(
-                        state.primal, state.dual,
-                        kernel.trialPrimal(), kernel.trialDual(), kernel.trialActivity()
-                    );
-                }
-                const double omega = stepController.parameters().primalWeight;
-                plainMovement = omega * trialResult.primalMovementWeighted +
-                    trialResult.dualMovementWeighted / omega;
-                kernel.commit(state, anchorPointer, lambda);
+                kernel.commit(state);
                 committed = true;
                 break;
             }
@@ -349,39 +316,6 @@ PdlpResult PdlpSolver::solve(
                 restartCount,
                 elapsedSeconds(start)
             ));
-        }
-
-        // Safeguarded Anderson extrapolation. The candidate is only kept if a
-        // fresh evaluation of T at it has a smaller fixed-point residual than the
-        // plain PDHG step just taken; that evaluation is the extra matrix pass
-        // the safeguard costs, and it is charged to stepTrials so the ablation
-        // compares like with like.
-        if (options.useAnderson && accelerator.size() >= 2) {
-            if (accelerator.extrapolate(andersonPrimal, andersonDual, andersonActivity)) {
-                savedPrimal = state.primal;
-                savedDual = state.dual;
-                savedActivity = state.rowActivity;
-
-                state.primal = andersonPrimal;
-                state.dual = andersonDual;
-                state.rowActivity = andersonActivity;
-
-                const KernelTrialResult candidate = kernel.trial(
-                    state, preconditioner, stepController.parameters());
-                ++stepTrials;
-
-                const double omega = stepController.parameters().primalWeight;
-                const double candidateMovement = omega * candidate.primalMovementWeighted +
-                    candidate.dualMovementWeighted / omega;
-
-                if (candidate.finite && candidateMovement < plainMovement) {
-                    kernel.commit(state);
-                } else {
-                    state.primal.swap(savedPrimal);
-                    state.dual.swap(savedDual);
-                    state.rowActivity.swap(savedActivity);
-                }
-            }
         }
 
         ++iterationsSinceRestart;
@@ -430,8 +364,6 @@ PdlpResult PdlpSolver::solve(
             ));
         }
 
-        stepController.observeProgress(currentMetrics.kktScore);
-
         const RestartDecision restart = restartController.choose(
             currentMetrics,
             averagedMetrics,
@@ -466,15 +398,9 @@ PdlpResult PdlpSolver::solve(
 
             restartPrimal = state.primal;
             restartDual = state.dual;
-            if (options.useHalpern) {
-                anchor.primal = state.primal;
-                anchor.dual = state.dual;
-                anchor.rowActivity = state.rowActivity;
-            }
             restartBaseline = restart.candidateScore;
             average.reset();
             restartController.reset();
-            accelerator.reset();
             iterationsSinceRestart = 0;
             ++restartCount;
         }

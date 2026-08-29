@@ -11,7 +11,6 @@ enum class PdlpStatus {
     Optimal,
     IterationLimit,
     TimeLimit,
-    Interrupted,
     NumericalFailure,
     InvalidProblem
 };

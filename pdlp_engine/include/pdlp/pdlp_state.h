@@ -22,15 +22,6 @@ struct PdlpState {
     std::int64_t iteration = 0;
 };
 
-// Anchor for Halpern acceleration: the iterate a restart cycle started from,
-// together with its row activity so the blended iterate's A*x follows exactly
-// by linearity instead of costing another sparse product.
-struct HalpernAnchor {
-    std::vector<double> primal;
-    std::vector<double> dual;
-    std::vector<double> rowActivity;
-};
-
 struct CandidateIterate {
     std::vector<double> primal;
     std::vector<double> dual;
