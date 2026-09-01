@@ -4,12 +4,14 @@
 #include <string>
 #include <vector>
 #include "benchmark/benchmarkresult.h"
+#include "benchmark/instancemanager.h"
 
 using namespace std;
 
 #ifdef _WIN32
 
 #include <windows.h>
+#include <psapi.h> 
 
 #else
 
@@ -18,6 +20,7 @@ using namespace std;
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/types.h>
+#include <sys/resource.h> 
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -41,6 +44,9 @@ struct ProcessResult {
 
     bool timedOut = false;
     bool launchFailed = false;
+
+    long long peakMemoryKB = -1;        // <-- ADD THIS (-1 = unknown/not measured)
+    bool memoryLimitExceeded = false;   // <-- ADD THIS
 };
 
 
@@ -55,7 +61,8 @@ public:
     ProcessResult run(
         const string& executable,
         const vector<string>& arguments,
-        chrono::milliseconds timeout
+        chrono::milliseconds timeout,
+        long long memoryLimitKB = -1
     );
 
 };
@@ -70,7 +77,8 @@ public:
 ProcessResult ProcessManager::run(
     const string& executable,
     const vector<string>& arguments,
-    chrono::milliseconds timeout
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
 ) {
 
     ProcessResult result;
@@ -89,6 +97,32 @@ ProcessResult ProcessManager::run(
 
     HANDLE stderrRead = NULL;
     HANDLE stderrWrite = NULL;
+
+    HANDLE jobObject = NULL;
+
+    if (memoryLimitKB > 0) {
+
+        jobObject = CreateJobObjectA(NULL, NULL);
+
+        if (jobObject != NULL) {
+
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limitInfo{};
+
+            limitInfo.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY |
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            limitInfo.ProcessMemoryLimit =
+                static_cast<SIZE_T>(memoryLimitKB) * 1024;
+
+            SetInformationJobObject(
+                jobObject,
+                JobObjectExtendedLimitInformation,
+                &limitInfo,
+                sizeof(limitInfo)
+            );
+        }
+    }
 
 
     // --------------------------------------------------------
@@ -208,7 +242,7 @@ ProcessResult ProcessManager::run(
         NULL,
         NULL,
         TRUE,
-        0,
+        CREATE_SUSPENDED,
         NULL,
         NULL,
         &startupInfo,
@@ -229,6 +263,12 @@ ProcessResult ProcessManager::run(
 
         return result;
     }
+
+        if (jobObject != NULL) {
+        AssignProcessToJobObject(jobObject, processInfo.hProcess);
+    }
+
+    ResumeThread(processInfo.hThread);   // process was created suspended — start it now
 
 
     // --------------------------------------------------------
@@ -499,6 +539,24 @@ ProcessResult ProcessManager::run(
         );
 
 
+    PROCESS_MEMORY_COUNTERS_EX memCounters{};
+
+    if (
+        GetProcessMemoryInfo(
+            processInfo.hProcess,
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memCounters),
+            sizeof(memCounters)
+        )
+    ) {
+        result.peakMemoryKB =
+            static_cast<long long>(memCounters.PeakWorkingSetSize) / 1024;
+    }
+
+    if (jobObject != NULL) {
+        CloseHandle(jobObject);
+    }
+
+
     // --------------------------------------------------------
     // Cleanup
     // --------------------------------------------------------
@@ -523,7 +581,8 @@ ProcessResult ProcessManager::run(
 ProcessResult ProcessManager::run(
     const string& executable,
     const vector<string>& arguments,
-    chrono::milliseconds timeout
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
 ) {
 
     ProcessResult result;
@@ -631,6 +690,23 @@ ProcessResult ProcessManager::run(
         close(stdoutPipe[0]);
         close(stderrPipe[0]);
         close(execErrorPipe[0]);
+
+                // ----------------------------------------------------
+        // Apply memory limit (best-effort)
+        // ----------------------------------------------------
+
+        if (memoryLimitKB > 0) {
+
+            struct rlimit memLimit;
+
+            memLimit.rlim_cur =
+                static_cast<rlim_t>(memoryLimitKB) * 1024;
+
+            memLimit.rlim_max =
+                static_cast<rlim_t>(memoryLimitKB) * 1024;
+
+            setrlimit(RLIMIT_AS, &memLimit);
+        }
 
 
         // ----------------------------------------------------
