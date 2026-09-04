@@ -1,74 +1,155 @@
-#include "postsolver/postsolver.h"
+#include "postsolve/postsolver.h"
+
 #include <algorithm>
 #include <cmath>
-#include <iostream>
+#include <limits>
 
-namespace postsolver {
+namespace postsolve {
 
-ValidationMetrics Postsolver::validate(const model::Model& originalModel, const Solution& sol) {
-    ValidationMetrics v;
-    v.isValid = true;
+PostsolveResult Postsolver::process(
+    const model::Model& originalModel,
+    const presolve::PresolveResult& presolveResult,
+    const std::vector<double>& presolvedPrimalSolution
+) {
+  PostsolveResult result;
 
-    if (sol.primalValues.size() != originalModel.variables.size()) {
-        v.isValid = false;
-        return v;
-    }
+  // 1. Handle presolve infeasibility immediately
+  if (presolveResult.infeasible) {
+    result.status = PostsolveStatus::PRESOLVE_INFEASIBLE;
+    return result;
+  }
 
-    // 1. Bounds Validation
-    for (size_t i = 0; i < originalModel.variables.size(); ++i) {
-        double val = sol.primalValues[i];
-        const auto& var = originalModel.variables[i];
+  std::size_t origVarCount = originalModel.variables.size();
+  std::vector<double> currentSolution(origVarCount, 0.0);
 
-        if (val < var.lowerBound - tolerance_) {
-            double viol = var.lowerBound - val;
-            v.maxBoundViolation = std::max(v.maxBoundViolation, viol);
+  // If the presolved model variables match the solution vector size, populate initial values
+  if (presolveResult.model.variables.size() != presolvedPrimalSolution.size()) {
+    result.status = PostsolveStatus::DIMENSION_MISMATCH;
+    return result;
+  }
+
+  // Copy available presolved variables
+  for (std::size_t i = 0; i < presolvedPrimalSolution.size(); ++i) {
+    currentSolution[i] = presolvedPrimalSolution[i];
+  }
+
+  // 2. Process transformations in REVERSE ORDER (T_N -> T_1)
+  const auto& history = presolveResult.transformations;
+  for (auto it = history.rbegin(); it != history.rend(); ++it) {
+    const auto& t = *it;
+
+    switch (t.type) {
+      case presolve::TransformationType::FixVariable:
+      case presolve::TransformationType::SingletonRowFixing: {
+        currentSolution[t.targetVarIndex] = t.constant;
+        break;
+      }
+
+      case presolve::TransformationType::EmptyColumn: {
+        // Restore value safely within original variable bounds
+        const auto& var = originalModel.variables[t.targetVarIndex];
+        double restoredVal = 0.0;
+        if (restoredVal < var.lowerBound) restoredVal = var.lowerBound;
+        if (restoredVal > var.upperBound) restoredVal = var.upperBound;
+
+        currentSolution[t.targetVarIndex] = restoredVal;
+        break;
+      }
+
+      case presolve::TransformationType::AggregateVariable: {
+        // x = constant + sum(coeff_i * y_i)
+        double val = t.constant;
+        for (const auto& term : t.substitutionTerms) {
+          val += term.coefficient * currentSolution[term.varIndex];
         }
-        if (val > var.upperBound + tolerance_) {
-            double viol = val - var.upperBound;
-            v.maxBoundViolation = std::max(v.maxBoundViolation, viol);
-        }
+        currentSolution[t.targetVarIndex] = val;
+        break;
+      }
+
+      case presolve::TransformationType::BoundTightening:
+      case presolve::TransformationType::RemoveRow:
+        break;
     }
+  }
 
-    // 2. Primal Feasibility & Numerical Residuals (Ax <= b, Ax == b, etc.)
-    for (const auto& constr : originalModel.constraints) {
-        double lhs = 0.0;
-        for (const auto& term : constr.terms) {
-            lhs += term.coefficient * sol.primalValues[term.varIndex];
-        }
+  result.primalValues = currentSolution;
 
-        if (lhs < constr.lowerBound - tolerance_) {
-            v.maxPrimalInfeasibility = std::max(v.maxPrimalInfeasibility, constr.lowerBound - lhs);
-        }
-        if (lhs > constr.upperBound + tolerance_) {
-            v.maxPrimalInfeasibility = std::max(v.maxPrimalInfeasibility, lhs - constr.upperBound);
-        }
-    }
+  // 3. Evaluate objective on full original solution
+  result.objectiveValue = evaluateObjective(originalModel, result.primalValues);
 
-    // 3. Objective Calculation Check
-    double computedObj = originalModel.objective.constant;
-    for (const auto& term : originalModel.objective.linearTerms) {
-        computedObj += term.value * sol.primalValues[term.varIndex];
-    }
-    v.absoluteObjectiveResidual = std::abs(computedObj - sol.objectiveValue);
+  // 4. Validate bounds and constraints
+  if (!validateSolution(originalModel, result.primalValues, result)) {
+    return result;
+  }
 
-    // Overall Validity Gate
-    if (v.maxBoundViolation > tolerance_ || v.maxPrimalInfeasibility > tolerance_) {
-        v.isValid = false;
-    }
-
-    return v;
+  result.status = PostsolveStatus::SUCCESS;
+  return result;
 }
 
-Solution Postsolver::unpresolve(const model::Model& originalModel, const Solution& reducedSolution) {
-    Solution fullSol = reducedSolution;
+double Postsolver::evaluateObjective(
+    const model::Model& originalModel,
+    const std::vector<double>& fullPrimalSolution
+) const {
+  double obj = originalModel.objective.constant;
 
-    // Validate reconstructed solution
-    ValidationMetrics metrics = validate(originalModel, fullSol);
-    if (!metrics.isValid && fullSol.status == SolverResult::OPTIMAL) {
-        fullSol.status = SolverResult::NUMERICAL_ERROR;
-    }
+  for (const auto& term : originalModel.objective.linearTerms) {
+    obj += term.value * fullPrimalSolution[term.varIndex];
+  }
 
-    return fullSol;
+  for (const auto& qterm : originalModel.objective.quadraticTerms) {
+    obj += 0.5 * qterm.value * fullPrimalSolution[qterm.row] * fullPrimalSolution[qterm.col];
+  }
+
+  return obj;
 }
 
-} // namespace postsolver
+bool Postsolver::validateSolution(
+    const model::Model& originalModel,
+    const std::vector<double>& sol,
+    PostsolveResult& result
+) const {
+  result.maxBoundViolation = 0.0;
+  result.maxConstraintViolation = 0.0;
+
+  // Check bounds
+  for (std::size_t i = 0; i < originalModel.variables.size(); ++i) {
+    const auto& var = originalModel.variables[i];
+    double val = sol[i];
+
+    if (val < var.lowerBound - tolerance_) {
+      result.maxBoundViolation = std::max(result.maxBoundViolation, var.lowerBound - val);
+    }
+    if (val > var.upperBound + tolerance_) {
+      result.maxBoundViolation = std::max(result.maxBoundViolation, val - var.upperBound);
+    }
+  }
+
+  if (result.maxBoundViolation > tolerance_) {
+    result.status = PostsolveStatus::BOUND_VIOLATION;
+    return false;
+  }
+
+  // Check constraints
+  for (const auto& constr : originalModel.constraints) {
+    double activity = 0.0;
+    for (const auto& term : constr.terms) {
+      activity += term.coefficient * sol[term.varIndex];
+    }
+
+    if (activity < constr.lowerBound - tolerance_) {
+      result.maxConstraintViolation = std::max(result.maxConstraintViolation, constr.lowerBound - activity);
+    }
+    if (activity > constr.upperBound + tolerance_) {
+      result.maxConstraintViolation = std::max(result.maxConstraintViolation, activity - constr.upperBound);
+    }
+  }
+
+  if (result.maxConstraintViolation > tolerance_) {
+    result.status = PostsolveStatus::CONSTRAINT_VIOLATION;
+    return false;
+  }
+
+  return true;
+}
+
+} // namespace postsolve

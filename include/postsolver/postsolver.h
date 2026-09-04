@@ -1,55 +1,56 @@
-#ifndef POSTSOLVER_H
-#define POSTSOLVER_H
+#pragma once
 
-#include <vector>
-#include <string>
-#include <cmath>
-#include <limits>
 #include "model/model.h"
+#include "presolve/presolve_result.h"
 
-namespace postsolver {
+#include <cstddef>
+#include <vector>
 
-// Statuses matching your architecture diagram
-enum class SolverResult {
-    OPTIMAL,
-    FEASIBLE,
-    INFEASIBLE,
-    UNBOUNDED,
-    TIME_LIMIT,
-    NUMERICAL_ERROR,
-    ERROR
+namespace postsolve {
+
+constexpr double DEFAULT_POSTSOLVE_TOLERANCE = 1e-6;
+
+enum class PostsolveStatus {
+  SUCCESS,
+  PRESOLVE_INFEASIBLE,
+  DIMENSION_MISMATCH,
+  BOUND_VIOLATION,
+  CONSTRAINT_VIOLATION,
+  INVALID_SOLUTION
 };
 
-struct Solution {
-    std::vector<double> primalValues;  // x
-    std::vector<double> dualValues;    // lambda / pi
-    double objectiveValue = 0.0;
-    SolverResult status = SolverResult::ERROR;
-};
-
-struct ValidationMetrics {
-    double maxPrimalInfeasibility = 0.0;
-    double maxDualInfeasibility = 0.0;
-    double maxBoundViolation = 0.0;
-    double maxIntegralityViolation = 0.0;
-    double absoluteObjectiveResidual = 0.0;
-    bool isValid = false;
+struct PostsolveResult {
+  PostsolveStatus status = PostsolveStatus::INVALID_SOLUTION;
+  std::vector<double> primalValues; // Restored to original variable ordering
+  double objectiveValue = 0.0;
+  double maxBoundViolation = 0.0;
+  double maxConstraintViolation = 0.0;
 };
 
 class Postsolver {
 public:
-    Postsolver(double tol = 1e-6) : tolerance_(tol) {}
+  explicit Postsolver(double tolerance = DEFAULT_POSTSOLVE_TOLERANCE)
+      : tolerance_(tolerance) {}
 
-    // Un-presolve mapping
-    Solution unpresolve(const model::Model& originalModel, const Solution& reducedSolution);
+  PostsolveResult process(
+      const model::Model& originalModel,
+      const presolve::PresolveResult& presolveResult,
+      const std::vector<double>& presolvedPrimalSolution
+  );
 
-    // Validator layer matching your diagram
-    ValidationMetrics validate(const model::Model& originalModel, const Solution& sol);
+  double evaluateObjective(
+      const model::Model& originalModel,
+      const std::vector<double>& fullPrimalSolution
+  ) const;
 
 private:
-    double tolerance_;
+  double tolerance_;
+
+  bool validateSolution(
+      const model::Model& originalModel,
+      const std::vector<double>& fullPrimalSolution,
+      PostsolveResult& result
+  ) const;
 };
 
-} // namespace postsolver
-
-#endif // POSTSOLVER_H
+} // namespace postsolve
