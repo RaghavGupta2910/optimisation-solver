@@ -32,6 +32,7 @@ add_library(pdlp_engine
     src/sparse_matrix.cpp
     src/parallel.cpp
     src/scaling.cpp
+    src/infeasibility.cpp
     src/preconditioner.cpp
     src/step_controller.cpp
     src/iterate_average.cpp

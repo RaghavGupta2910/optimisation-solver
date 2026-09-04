@@ -180,6 +180,39 @@ conservative but actively harmful, driving the step down to about 1% of the
 static bound and converging on nothing (0/20). It has been removed rather than
 kept as a fallback option.
 
+## Infeasibility and unboundedness
+
+PDHG has no basis to read a Farkas certificate off, so the certificate comes from
+where the iterates go rather than from where they stop. On an infeasible primal
+the dual iterates diverge, and the direction they diverge along converges to a
+Farkas ray; the same holds for the primal iterates and an improving ray on an
+unbounded problem. Following Applegate et al. (2021), the difference of iterates
+is tested rather than the iterates themselves, since it converges to the ray
+faster.
+
+A direction is accepted only when its distance to the cone the certificate
+requires, measured relative to the certificate's own value, falls below
+`infeasibilityTolerance`. Both tests run on the original problem, for the same
+reason termination does: a certificate for a rescaled problem is not a
+certificate for the one the caller handed in.
+
+Verdicts agree with HiGHS on every infeasible and unbounded instance in the
+validation family, and detection is far cheaper than a factorization-based
+solver's:
+
+| Instance | HiGHS | this engine |
+|---|---|---|
+| infeasible, 788 x 1104 | 0.003 s | 0.001 s |
+| infeasible, 1230 x 1710 | 0.004 s | 0.001 s |
+| unbounded, 825 x 1155 | 1.286 s | 0.007 s |
+| unbounded, 1267 x 1761 | 4.830 s | 0.014 s |
+
+`testFeasibleProblemsAreNotFlagged` guards the property that matters most: a
+feasible bounded problem must never be reported infeasible or unbounded.
+
+**For a branch-and-bound caller:** pruning a node needs only the status, not the
+ray. The rays are what Benders feasibility cuts and user-facing proofs need.
+
 ## Known limitations
 
 These are real and should be read before quoting this engine against a

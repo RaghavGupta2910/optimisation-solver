@@ -67,6 +67,16 @@ def main(directory):
         status, obj = parts[0], float(parts[1])
         pdlp_time = float(parts[5]) if len(parts) > 5 else float("nan")
 
+        highs_label = {0: "optimal", 2: "infeasible", 3: "unbounded"}.get(
+            res.status, f"status {res.status}")
+        if res.status != 0:
+            agree = ((highs_label == "infeasible" and status == "infeasible")
+                     or (highs_label == "unbounded" and status == "unbounded"))
+            mark = "agree" if agree else "MISMATCH"
+            print(f"{name:<12}{highs_label:>16}{status:>16}{'':>11}"
+                  f"{highs_time:>9.3f}{pdlp_time:>9.3f}  {mark}")
+            continue
+
         if res.status == 0:
             ref = res.fun + offset
             rel = abs(obj - ref) / (1.0 + abs(ref))

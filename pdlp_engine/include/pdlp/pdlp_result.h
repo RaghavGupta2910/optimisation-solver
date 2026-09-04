@@ -9,6 +9,14 @@ namespace pdlp {
 
 enum class PdlpStatus {
     Optimal,
+
+    // Proven primal infeasible, with a Farkas ray in `dualRay`.
+    Infeasible,
+
+    // Proven dual infeasible: the primal is unbounded along `primalRay`,
+    // provided it is feasible.
+    Unbounded,
+
     IterationLimit,
     TimeLimit,
     NumericalFailure,
@@ -21,6 +29,12 @@ struct PdlpResult {
 
     std::vector<double> primal;
     std::vector<double> rowDual;
+
+    // Populated for Infeasible and Unbounded respectively, in the original
+    // problem's coordinates. A branch-and-bound layer needs only the status to
+    // prune a node; the rays are what Benders cuts and user-facing proofs need.
+    std::vector<double> dualRay;
+    std::vector<double> primalRay;
 
     double primalObjective = std::numeric_limits<double>::quiet_NaN();
     double dualObjective = -std::numeric_limits<double>::infinity();

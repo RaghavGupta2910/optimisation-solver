@@ -32,6 +32,13 @@ struct PdlpOptions {
     bool useRuizScaling = true;
     int ruizIterations = 10;
 
+    // Infeasibility and unboundedness detection from the iterate sequence.
+    // A direction is accepted as a certificate when its distance to the
+    // required cone, relative to the certificate's own value, falls below
+    // infeasibilityTolerance.
+    bool detectInfeasibility = true;
+    double infeasibilityTolerance = 1e-8;
+
     bool useDiagonalPreconditioning = true;
 
     // PDLP adaptive linesearch. The step size is free to exceed the static

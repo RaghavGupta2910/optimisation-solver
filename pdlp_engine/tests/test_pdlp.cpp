@@ -16,6 +16,19 @@ namespace {
 
 constexpr double kInfinity = std::numeric_limits<double>::infinity();
 
+// Tests index vectors with int loop counters throughout. This keeps that
+// readable without a static_cast at every subscript, and keeps the suite clean
+// under -Wsign-conversion.
+template <typename T>
+T& at(std::vector<T>& values, int index) {
+    return values[static_cast<std::size_t>(index)];
+}
+
+template <typename T>
+const T& at(const std::vector<T>& values, int index) {
+    return values[static_cast<std::size_t>(index)];
+}
+
 int failures = 0;
 
 void require(bool condition, const std::string& message) {
@@ -109,9 +122,9 @@ void testCsrCscAgree() {
 
     // <A x, y> == <x, A^T y> holds only if both representations agree.
     double left = 0.0;
-    for (int i = 0; i < 25; ++i) { left += ax[i] * y[i]; }
+    for (int i = 0; i < 25; ++i) { left += at(ax, i) * at(y, i); }
     double right = 0.0;
-    for (int j = 0; j < 40; ++j) { right += x[j] * aty[j]; }
+    for (int j = 0; j < 40; ++j) { right += at(x, j) * at(aty, j); }
     requireNear(left, right, 1e-9 * (1.0 + std::abs(left)), "CSR/CSC adjoint identity");
 }
 
@@ -350,8 +363,8 @@ void testDegenerateProblem() {
     pdlp::CompiledLp problem;
     problem.matrix = pdlp::SparseMatrix::fromTriplets(row, n, triplets);
     problem.objective.assign(n, -1.0);
-    problem.rowLower.assign(row, -kInfinity);
-    problem.rowUpper.assign(row, 1.0);
+    problem.rowLower.assign(static_cast<std::size_t>(row), -kInfinity);
+    problem.rowUpper.assign(static_cast<std::size_t>(row), 1.0);
     problem.variableLower.assign(n, 0.0);
     problem.variableUpper.assign(n, 1.0);
 
@@ -464,16 +477,16 @@ void testThreadCountDoesNotChangeTheAnswer() {
 
     std::vector<double> reference(columns);
     for (int j = 0; j < columns; ++j) {
-        problem.objective[j] = value(generator);
-        reference[j] = 5.0 * unit(generator);
+        at(problem.objective, j) = value(generator);
+        at(reference, j) = 5.0 * unit(generator);
     }
     std::vector<double> activity;
     problem.matrix.multiply(reference, activity);
     problem.rowLower.resize(rows);
     problem.rowUpper.resize(rows);
     for (int i = 0; i < rows; ++i) {
-        problem.rowLower[i] = -kInfinity;
-        problem.rowUpper[i] = activity[i] + 0.5;
+        at(problem.rowLower, i) = -kInfinity;
+        at(problem.rowUpper, i) = at(activity, i) + 0.5;
     }
 
     pdlp::PdlpOptions options;
@@ -586,6 +599,134 @@ void testStepPoliciesAgreeOnTheOptimum() {
                 "fixed and adaptive step objectives");
 }
 
+
+// ---------------------------------------------------------------------------
+// Infeasibility and unboundedness
+// ---------------------------------------------------------------------------
+
+// Contradictory rows: x + y >= 2 and x + y <= 1 cannot both hold.
+void testDetectsInfeasibleRows() {
+    pdlp::CompiledLp problem;
+    problem.matrix = pdlp::SparseMatrix::fromTriplets(
+        2, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
+    problem.objective = {1.0, 1.0};
+    problem.rowLower = {2.0, -kInfinity};
+    problem.rowUpper = {kInfinity, 1.0};
+    problem.variableLower = {0.0, 0.0};
+    problem.variableUpper = {10.0, 10.0};
+
+    auto options = strictOptions();
+    options.iterationLimit = 20000;
+    const auto result = pdlp::PdlpSolver{}.solve(problem, options);
+    require(result.status == pdlp::PdlpStatus::Infeasible,
+            "contradictory rows should be proven infeasible, got " +
+            std::string(pdlp::toString(result.status)));
+    require(result.dualRay.size() == 2, "a Farkas ray should be returned");
+
+    // Verify the returned ray independently of the detector that produced it:
+    // inf over the box of (A'y)'x minus sup over the row bounds of y'z must be
+    // strictly positive.
+    const std::vector<double>& y = result.dualRay;
+    const double reduced0 = y[0] + y[1];
+    const double reduced1 = y[0] + y[1];
+    const double boxInfimum =
+        (reduced0 > 0.0 ? reduced0 * 0.0 : reduced0 * 10.0) +
+        (reduced1 > 0.0 ? reduced1 * 0.0 : reduced1 * 10.0);
+    const double support =
+        (y[0] > 0.0 ? 0.0 : y[0] * 2.0) + (y[1] > 0.0 ? y[1] * 1.0 : 0.0);
+    require(boxInfimum - support > 1e-9,
+            "returned ray does not certify infeasibility: value " +
+            std::to_string(boxInfimum - support));
+}
+
+// Two equalities on the same row vector with different right-hand sides.
+void testDetectsInfeasibleEqualities() {
+    pdlp::CompiledLp problem;
+    problem.matrix = pdlp::SparseMatrix::fromTriplets(
+        2, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
+    problem.objective = {0.0, 0.0};
+    problem.rowLower = {1.0, 2.0};
+    problem.rowUpper = {1.0, 2.0};
+    problem.variableLower = {-kInfinity, -kInfinity};
+    problem.variableUpper = {kInfinity, kInfinity};
+
+    auto options = strictOptions();
+    options.iterationLimit = 20000;
+    const auto result = pdlp::PdlpSolver{}.solve(problem, options);
+    require(result.status == pdlp::PdlpStatus::Infeasible,
+            "inconsistent equalities should be proven infeasible, got " +
+            std::string(pdlp::toString(result.status)));
+}
+
+// min -x with x unbounded above and no row constraining it from above.
+void testDetectsUnbounded() {
+    pdlp::CompiledLp problem;
+    problem.matrix = pdlp::SparseMatrix::fromTriplets(1, 2, {{0, 1, 1.0}});
+    problem.objective = {-1.0, 0.0};
+    problem.rowLower = {-kInfinity};
+    problem.rowUpper = {5.0};
+    problem.variableLower = {0.0, 0.0};
+    problem.variableUpper = {kInfinity, 10.0};
+
+    auto options = strictOptions();
+    options.iterationLimit = 20000;
+    const auto result = pdlp::PdlpSolver{}.solve(problem, options);
+    require(result.status == pdlp::PdlpStatus::Unbounded,
+            "unbounded LP should be proven unbounded, got " +
+            std::string(pdlp::toString(result.status)));
+    require(result.primalRay.size() == 2, "an improving ray should be returned");
+    require(result.primalRay[0] > 0.0,
+            "the ray must grow the unbounded variable");
+}
+
+// The safety property that matters most: a feasible, bounded problem must never
+// be reported infeasible or unbounded.
+void testFeasibleProblemsAreNotFlagged() {
+    std::mt19937 generator(17);
+    std::uniform_real_distribution<double> value(-1.0, 1.0);
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    std::uniform_int_distribution<int> pick(0, 599);
+
+    for (int instance = 0; instance < 6; ++instance) {
+        const int rows = 300 + 40 * instance;
+        const int columns = 600;
+        std::vector<pdlp::MatrixTriplet> triplets;
+        for (int row = 0; row < rows; ++row) {
+            for (int k = 0; k < 8; ++k) {
+                triplets.push_back({row, pick(generator), value(generator)});
+            }
+        }
+
+        pdlp::CompiledLp problem;
+        problem.matrix = pdlp::SparseMatrix::fromTriplets(rows, columns, triplets);
+        problem.objective.resize(columns);
+        problem.variableLower.assign(columns, 0.0);
+        problem.variableUpper.assign(columns, 4.0);
+
+        std::vector<double> reference(columns);
+        for (int j = 0; j < columns; ++j) {
+            at(problem.objective, j) = value(generator);
+            at(reference, j) = 4.0 * unit(generator);
+        }
+        std::vector<double> activity;
+        problem.matrix.multiply(reference, activity);
+        problem.rowLower.resize(static_cast<std::size_t>(rows));
+        problem.rowUpper.resize(static_cast<std::size_t>(rows));
+        for (int i = 0; i < rows; ++i) {
+            at(problem.rowLower, i) = at(activity, i) - 0.5;
+            at(problem.rowUpper, i) = at(activity, i) + 0.5;
+        }
+
+        auto options = strictOptions();
+        options.iterationLimit = 6000;
+        const auto result = pdlp::PdlpSolver{}.solve(problem, options);
+        require(result.status != pdlp::PdlpStatus::Infeasible &&
+                    result.status != pdlp::PdlpStatus::Unbounded,
+                "feasible bounded instance was wrongly flagged as " +
+                std::string(pdlp::toString(result.status)));
+    }
+}
+
 void run(const char* name, void (*test)()) {
     try {
         test();
@@ -619,6 +760,11 @@ int main() {
     run("invalidProblemIsRejected", testInvalidProblemIsRejected);
     run("timeLimitIsHonoured", testTimeLimitIsHonoured);
     run("threadCountDoesNotChangeTheAnswer", testThreadCountDoesNotChangeTheAnswer);
+
+    run("detectsInfeasibleRows", testDetectsInfeasibleRows);
+    run("detectsInfeasibleEqualities", testDetectsInfeasibleEqualities);
+    run("detectsUnbounded", testDetectsUnbounded);
+    run("feasibleProblemsAreNotFlagged", testFeasibleProblemsAreNotFlagged);
 
     run("linesearchExceedsStaticBound", testLinesearchExceedsStaticBound);
     run("stepPoliciesAgreeOnTheOptimum", testStepPoliciesAgreeOnTheOptimum);
