@@ -79,6 +79,58 @@ Instance makeInstance(int rows, int columns, int nnzPerRow, unsigned seed, int f
 
     problem.rowLower.resize(rows);
     problem.rowUpper.resize(rows);
+
+    if (flavour == 4) {
+        // Genuinely contradictory: give two rows the SAME coefficient vector and
+        // then demand a'x >= t + 1 and a'x <= t - 1. Requiring different rows to
+        // disagree is not infeasible, which an earlier version of this generator
+        // got wrong.
+        problem.rowLower.assign(rows, -kInfinity);
+        problem.rowUpper.assign(rows, kInfinity);
+        std::vector<pdlp::MatrixTriplet> paired;
+        for (const auto& entry : instance.triplets) {
+            if (entry.row % 2 == 0) {
+                paired.push_back(entry);
+                paired.push_back({entry.row + 1, entry.column, entry.value});
+            }
+        }
+        instance.triplets = paired;
+        problem.matrix = pdlp::SparseMatrix::fromTriplets(rows, columns, paired);
+        problem.matrix.multiply(reference, activity);
+        for (int i = 0; i + 1 < rows; i += 2) {
+            problem.rowLower[i] = activity[i] + 1.0;
+            problem.rowUpper[i + 1] = activity[i] - 1.0;
+        }
+        for (int j = 0; j < columns; ++j) {
+            problem.variableLower[j] = 0.0;
+            problem.variableUpper[j] = 10.0;
+        }
+        return instance;
+    }
+    if (flavour == 5) {
+        // Unbounded in the clearest possible way: the last column appears in no
+        // row at all, has a negative cost and no upper bound, so the objective
+        // decreases without limit while every constraint stays satisfied.
+        for (int i = 0; i < rows; ++i) {
+            problem.rowLower[i] = activity[i] - 1.0;
+            problem.rowUpper[i] = activity[i] + 1.0;
+        }
+        instance.triplets.erase(
+            std::remove_if(
+                instance.triplets.begin(), instance.triplets.end(),
+                [columns](const pdlp::MatrixTriplet& e) {
+                    return e.column == columns - 1;
+                }),
+            instance.triplets.end());
+        problem.matrix = pdlp::SparseMatrix::fromTriplets(rows, columns, instance.triplets);
+        problem.objective[columns - 1] = -1.0;
+        problem.variableLower[columns - 1] = 0.0;
+        problem.variableUpper[columns - 1] = kInfinity;
+        return instance;
+    }
+
+    problem.rowLower.resize(rows);
+    problem.rowUpper.resize(rows);
     for (int i = 0; i < rows; ++i) {
         const int kind = (flavour == 1) ? 0 : (i % 3);
         switch (kind) {
@@ -147,7 +199,7 @@ int main(int argc, char** argv) {
                 "gap", "seconds");
 
     for (int index = 0; index < count; ++index) {
-        const int flavour = index % 4;
+        const int flavour = index % 6;
         const int scale = 1 + index / 4;
         const int rows = 200 + 220 * scale + 37 * index;
         const int columns = 300 + 300 * scale + 51 * index;

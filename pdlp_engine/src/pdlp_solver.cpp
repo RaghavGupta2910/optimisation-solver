@@ -1,6 +1,7 @@
 #include "pdlp/pdlp_solver.h"
 
 #include "pdlp/feasibility_polishing.h"
+#include "pdlp/infeasibility.h"
 #include "pdlp/iterate_average.h"
 #include "pdlp/parallel.h"
 #include "pdlp/pdhg_kernel.h"
@@ -66,6 +67,17 @@ PdlpResult makeResult(
     return result;
 }
 
+void difference(
+    const std::vector<double>& left,
+    const std::vector<double>& right,
+    std::vector<double>& result
+) {
+    result.resize(left.size());
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        result[i] = left[i] - right[i];
+    }
+}
+
 double squaredDistance(
     const std::vector<double>& left,
     const std::vector<double>& right
@@ -91,6 +103,8 @@ PdlpResult invalidProblem(std::string message, double solveTime) {
 const char* toString(PdlpStatus status) noexcept {
     switch (status) {
         case PdlpStatus::Optimal: return "optimal";
+        case PdlpStatus::Infeasible: return "infeasible";
+        case PdlpStatus::Unbounded: return "unbounded";
         case PdlpStatus::IterationLimit: return "iteration_limit";
         case PdlpStatus::TimeLimit: return "time_limit";
         case PdlpStatus::NumericalFailure: return "numerical_failure";
@@ -194,6 +208,11 @@ PdlpResult PdlpSolver::solve(
     IterateAverage average(columns, rows, executor.get());
     TerminationChecker checker(options, problem, executor.get(), plan.get());
     RestartController restartController(options);
+    InfeasibilityDetector detector(problem, options, executor.get(), plan.get());
+
+    // Candidate ray directions, in the original problem's coordinates.
+    std::vector<double> primalDirection;
+    std::vector<double> dualDirection;
 
     // Scores a working-coordinate iterate against the original problem. The
     // original-coordinate vectors stay addressable afterwards, so an improved
@@ -348,6 +367,57 @@ PdlpResult PdlpSolver::solve(
                 best.primal = *scoredPrimal;
                 best.dual = *scoredDual;
                 bestMetrics = averagedMetrics;
+            }
+        }
+
+        // Certificate test. The iterate difference since the last restart is the
+        // direction the sequence is diverging along; on an infeasible or
+        // unbounded problem it converges to a ray. Testing it costs two matrix
+        // passes, so it happens only on a check boundary.
+        if (options.detectInfeasibility) {
+            difference(state.primal, restartPrimal, primalDirection);
+            difference(state.dual, restartDual, dualDirection);
+
+            std::vector<double> rowRay;
+            std::vector<double> columnRay;
+            if (scalingPointer != nullptr) {
+                scalingPointer->toOriginal(
+                    primalDirection, dualDirection, columnRay, rowRay);
+            } else {
+                columnRay = primalDirection;
+                rowRay = dualDirection;
+            }
+
+            const InfeasibilityVerdict dualVerdict = detector.testDualRay(rowRay);
+            if (dualVerdict.provesPrimalInfeasible) {
+                PdlpResult result = withDiagnostics(makeResult(
+                    PdlpStatus::Infeasible,
+                    "Primal infeasible: Farkas ray found",
+                    std::move(best),
+                    bestMetrics,
+                    state.iteration,
+                    stepTrials,
+                    restartCount,
+                    elapsedSeconds(start)
+                ));
+                result.dualRay = std::move(rowRay);
+                return result;
+            }
+
+            const InfeasibilityVerdict primalVerdict = detector.testPrimalRay(columnRay);
+            if (primalVerdict.provesUnbounded) {
+                PdlpResult result = withDiagnostics(makeResult(
+                    PdlpStatus::Unbounded,
+                    "Unbounded: improving ray found",
+                    std::move(best),
+                    bestMetrics,
+                    state.iteration,
+                    stepTrials,
+                    restartCount,
+                    elapsedSeconds(start)
+                ));
+                result.primalRay = std::move(columnRay);
+                return result;
             }
         }
 
