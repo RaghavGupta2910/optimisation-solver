@@ -1,0 +1,125 @@
+================================================================================
+TEST SUITE: SINGLETON-ROW PRESOLVE SPECIFICATION
+Location: tests/presolver/
+Target Feature: Presolve reduction for rows containing exactly 1 variable
+================================================================================
+
+--------------------------------------------------------------------------------
+1. ONE-VARIABLE <= CONSTRAINT
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, +infinity]
+  - Constraint: 2.0 * x <= 10.0
+
+Expected Behavior:
+  - Isolate x: x <= 10.0 / 2.0  ==>  x <= 5.0
+  - Tighten upper bound: min(+infinity, 5.0) = 5.0
+  - Expected Model State: x in [0.0, 5.0]
+  - Expected Presolve Result: MODEL_CHANGED (or FEASIBLE)
+
+--------------------------------------------------------------------------------
+2. ONE-VARIABLE >= CONSTRAINT
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, 10.0]
+  - Constraint: 3.0 * x >= 12.0
+
+Expected Behavior:
+  - Isolate x: x >= 12.0 / 3.0  ==>  x >= 4.0
+  - Tighten lower bound: max(0.0, 4.0) = 4.0
+  - Expected Model State: x in [4.0, 10.0]
+  - Expected Presolve Result: MODEL_CHANGED (or FEASIBLE)
+
+--------------------------------------------------------------------------------
+3. ONE-VARIABLE EQUALITY CONSTRAINT
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, 10.0]
+  - Constraint: 4.0 * x == 20.0 (lowerBound = 20.0, upperBound = 20.0)
+
+Expected Behavior:
+  - Isolate x: x == 20.0 / 4.0  ==>  x == 5.0
+  - Fix variable: set lowerBound = 5.0 and upperBound = 5.0
+  - Expected Model State: x in [5.0, 5.0] (Fixed)
+  - Expected Presolve Result: MODEL_CHANGED (or FEASIBLE)
+
+--------------------------------------------------------------------------------
+4. SINGLETON CONSTRAINT THAT TIGHTENS A VARIABLE'S LOWER BOUND
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [1.0, 10.0]
+  - Constraint: 2.0 * x >= 8.0
+
+Expected Behavior:
+  - Implied bound: x >= 4.0
+  - Compare with existing lower bound: max(1.0, 4.0) = 4.0
+  - Expected Model State: x lower bound updates from 1.0 to 4.0 (x in [4.0, 10.0])
+  - Expected Presolve Result: MODEL_CHANGED
+
+--------------------------------------------------------------------------------
+5. SINGLETON CONSTRAINT THAT TIGHTENS A VARIABLE'S UPPER BOUND
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, 10.0]
+  - Constraint: 5.0 * x <= 15.0
+
+Expected Behavior:
+  - Implied bound: x <= 3.0
+  - Compare with existing upper bound: min(10.0, 3.0) = 3.0
+  - Expected Model State: x upper bound updates from 10.0 to 3.0 (x in [0.0, 3.0])
+  - Expected Presolve Result: MODEL_CHANGED
+
+--------------------------------------------------------------------------------
+6. SINGLETON CONSTRAINT THAT FIXES A VARIABLE
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, 10.0]
+  - Constraint: 2.0 * x == 10.0
+
+Expected Behavior:
+  - Implied bound: x == 5.0
+  - Both bounds collapse to 5.0
+  - Expected Model State: x.lowerBound = 5.0, x.upperBound = 5.0
+  - Expected Presolve Result: MODEL_CHANGED
+
+--------------------------------------------------------------------------------
+7. SINGLETON CONSTRAINT THAT MAKES THE MODEL INFEASIBLE
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, 2.0]
+  - Constraint: 3.0 * x >= 12.0
+
+Expected Behavior:
+  - Implied bound: x >= 4.0
+  - Conflict check: new lower bound (4.0) > existing upper bound (2.0)
+  - Expected Presolve Result: INFEASIBLE (Presolver short-circuits execution)
+
+--------------------------------------------------------------------------------
+8. NEGATIVE COEFFICIENT CASES
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [0.0, 10.0]
+  - Constraint 1: -2.0 * x <= -6.0
+  - Constraint 2: -3.0 * x >= -15.0
+
+Expected Behavior:
+  - Division by negative coefficient flips inequality directions:
+      -2.0 * x <= -6.0  ==>  x >= (-6.0 / -2.0) = 3.0  (Tightens lower bound)
+      -3.0 * x >= -15.0 ==>  x <= (-15.0 / -3.0) = 5.0 (Tightens upper bound)
+  - Expected Model State: x in [3.0, 5.0]
+  - Expected Presolve Result: MODEL_CHANGED
+
+--------------------------------------------------------------------------------
+9. VARIABLES WITH EXISTING FINITE BOUNDS (WEAKER CONSTRAINTS)
+--------------------------------------------------------------------------------
+Input Model:
+  - Variable: x, bounds = [2.0, 5.0]
+  - Constraint 1: 1.0 * x >= 1.0
+  - Constraint 2: 1.0 * x <= 8.0
+
+Expected Behavior:
+  - Implied lower bound: x >= 1.0. Compare: max(2.0, 1.0) = 2.0 (Retain existing)
+  - Implied upper bound: x <= 8.0. Compare: min(5.0, 8.0) = 5.0 (Retain existing)
+  - Expected Model State: Bounds remain unchanged at [2.0, 5.0]
+  - Expected Presolve Result: FEASIBLE / NO_CHANGE
+================================================================================

@@ -25,4 +25,9 @@ struct Transformation {
   std::string reason;
 };
 
+struct LinearTerm {
+  std::size_t varIndex;
+  double coefficient;
+};
+
 } // namespace presolve
