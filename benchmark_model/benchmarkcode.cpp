@@ -5,6 +5,7 @@
 #include <vector>
 #include "benchmark/benchmarkresult.h"
 #include "benchmark/instancemanager.h"
+#include "benchmark/processmanager.h"
 
 using namespace std;
 
@@ -28,45 +29,6 @@ using namespace std;
 
 
 namespace benchmark {
-
-// ============================================================
-// ProcessResult
-// ============================================================
-
-struct ProcessResult {
-
-    int exitCode = -1;
-
-    string stdoutOutput;
-    string stderrOutput;
-
-    chrono::milliseconds runtime{0};
-
-    bool timedOut = false;
-    bool launchFailed = false;
-
-    long long peakMemoryKB = -1;        // <-- ADD THIS (-1 = unknown/not measured)
-    bool memoryLimitExceeded = false;   // <-- ADD THIS
-};
-
-
-// ============================================================
-// ProcessManager
-// ============================================================
-
-class ProcessManager {
-
-public:
-
-    ProcessResult run(
-        const string& executable,
-        const vector<string>& arguments,
-        chrono::milliseconds timeout,
-        long long memoryLimitKB = -1
-    );
-
-};
-
 
 // ============================================================
 // WINDOWS IMPLEMENTATION
@@ -691,22 +653,7 @@ ProcessResult ProcessManager::run(
         close(stderrPipe[0]);
         close(execErrorPipe[0]);
 
-                // ----------------------------------------------------
-        // Apply memory limit (best-effort)
-        // ----------------------------------------------------
-
-        if (memoryLimitKB > 0) {
-
-            struct rlimit memLimit;
-
-            memLimit.rlim_cur =
-                static_cast<rlim_t>(memoryLimitKB) * 1024;
-
-            memLimit.rlim_max =
-                static_cast<rlim_t>(memoryLimitKB) * 1024;
-
-            setrlimit(RLIMIT_AS, &memLimit);
-        }
+        
 
 
         // ----------------------------------------------------
@@ -757,6 +704,24 @@ ProcessResult ProcessManager::run(
 
         close(stdoutPipe[1]);
         close(stderrPipe[1]);
+
+                 // ----------------------------------------------------
+        // Apply memory limit (best-effort)
+        // ----------------------------------------------------
+
+        if (memoryLimitKB > 0) {
+
+            struct rlimit memLimit;
+
+            memLimit.rlim_cur =
+                static_cast<rlim_t>(memoryLimitKB) * 1024;
+
+            memLimit.rlim_max =
+                static_cast<rlim_t>(memoryLimitKB) * 1024;
+
+            setrlimit(RLIMIT_AS, &memLimit);
+        }
+
 
 
         // ----------------------------------------------------
@@ -908,7 +873,24 @@ ProcessResult ProcessManager::run(
             2,
             20
         );
+        
+            // --------------------------------------------------------
+    // Peak memory usage (best-effort, Linux only)
+    // --------------------------------------------------------
 
+    struct rusage usage{};
+
+    if (getrusage(RUSAGE_CHILDREN, &usage) == 0) {
+        result.peakMemoryKB = usage.ru_maxrss;   // already in KB on Linux
+    }
+
+    if (
+        memoryLimitKB > 0 &&
+        WIFSIGNALED(waitStatus) &&
+        (WTERMSIG(waitStatus) == SIGKILL || WTERMSIG(waitStatus) == SIGSEGV)
+    ) {
+        result.memoryLimitExceeded = true;
+    }
 
         // ----------------------------------------------------
         // Drain stdout
@@ -1174,22 +1156,60 @@ ProcessResult ProcessManager::run(
 // BenchmarkResult. Does not do any solver-specific parsing.
 // ============================================================
 
-inline BenchmarkResult runBenchmark(
+BenchmarkResult runBenchmark(
     ProcessManager& manager,
     const string& solverName,
     const string& instanceName,
     const string& executable,
     const vector<string>& arguments,
-    chrono::milliseconds timeout
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
 ) {
     ProcessResult processResult =
-        manager.run(executable, arguments, timeout);
+        manager.run(executable, arguments, timeout, memoryLimitKB);
 
     return buildBenchmarkResult(
         solverName,
         instanceName,
         processResult
     );
+}
+
+// ============================================================
+// runBenchmarkSuite
+//
+// Discovers instances via InstanceManager (if given a directory)
+// or accepts an explicit list, runs each one, and returns all
+// results — ready for computeAggregateMetrics()/groupBySolver().
+// ============================================================
+
+    vector<BenchmarkResult> runBenchmarkSuite(
+    ProcessManager& manager,
+    const string& solverName,
+    const vector<BenchmarkInstance>& instances,
+    const string& executable,
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
+) {
+    vector<BenchmarkResult> results;
+    results.reserve(instances.size());
+
+    for (const BenchmarkInstance& instance : instances) {
+
+        BenchmarkResult result = runBenchmark(
+            manager,
+            solverName,
+            instance.name,
+            executable,
+            { instance.path },
+            timeout,
+            memoryLimitKB
+        );
+
+        results.push_back(result);
+    }
+
+    return results;
 }
 
 } // namespace benchmark
