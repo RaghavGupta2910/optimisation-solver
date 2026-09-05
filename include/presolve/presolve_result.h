@@ -12,6 +12,7 @@ struct PresolveResult {
   model::Model model;
 
   bool infeasible = false;
+  bool converged = true;
 
   std::size_t originalVariables = 0;
   std::size_t originalConstraints = 0;
@@ -20,6 +21,8 @@ struct PresolveResult {
   std::size_t presolvedConstraints = 0;
 
   std::vector<Transformation> transformations;
+
+  PostsolveMetadata postsolve;
 };
 
 } // namespace presolve

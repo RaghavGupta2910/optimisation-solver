@@ -4,6 +4,7 @@
 #include "presolve/presolve_result.h"
 
 #include <cstddef>
+#include <vector>
 
 namespace presolve {
 
@@ -12,49 +13,32 @@ public:
   PresolveResult run(const model::Model &input);
 
 private:
-  // ==========================================================
-  // Batch 1
-  // ==========================================================
+  void removeVariable(model::Model &model, std::size_t variableIndex,
+                      std::vector<std::size_t> &currentToOrigVar);
 
-  void removeVariable(model::Model &model, std::size_t variableIndex);
-
-  void removeZeroCoefficients(model::Model &model);
+  bool removeZeroCoefficients(model::Model &model);
 
   bool fixVariable(model::Model &model, std::size_t variableIndex,
-                   double value);
+                   double value, PresolveResult &result,
+                   std::vector<std::size_t> &currentToOrigVar);
 
-  // ==========================================================
-  // Batch 2
-  // ==========================================================
-
-  // 5. Singleton rows
   bool processSingletonRow(model::Model &model, std::size_t constraintIndex,
-                           PresolveResult &result);
+                           PresolveResult &result,
+                           const std::vector<std::size_t> &currentToOrigVar,
+                           std::vector<std::size_t> &currentToOrigConstraint);
 
-  // 6. Simple infeasibility detection
   bool detectSimpleInfeasibility(const model::Model &model) const;
 
-  // 7. Bound tightening
-  bool tightenBounds(model::Model &model, PresolveResult &result);
+  bool tightenBounds(model::Model &model, PresolveResult &result,
+                     const std::vector<std::size_t> &currentToOrigVar,
+                     const std::vector<std::size_t> &currentToOrigConstraint);
 
-  // 8. Implied bounds
-  bool applyImpliedBounds(model::Model &model, PresolveResult &result);
+  bool removeRedundantConstraints(model::Model &model, PresolveResult &result,
+                                  std::vector<std::size_t> &currentToOrigConstraint);
 
-  // 9. Redundant constraints
-  bool removeRedundantConstraints(model::Model &model, PresolveResult &result);
-
-  // 10/13. Duplicate / parallel rows
   bool removeDuplicateAndParallelRows(model::Model &model,
-                                      PresolveResult &result);
-
-  // 11. Dominated columns
-  bool removeDominatedColumns(model::Model &model, PresolveResult &result);
-
-  // 12. Parallel columns
-  bool processParallelColumns(model::Model &model, PresolveResult &result);
-
-  // 14/15. Dependent equations / rank dependency
-  bool detectDependentEquations(model::Model &model, PresolveResult &result);
+                                      PresolveResult &result,
+                                      std::vector<std::size_t> &currentToOrigConstraint);
 
   // ==========================================================
   // Helpers
@@ -74,9 +58,6 @@ private:
 
   bool constraintsParallel(const model::Constraint &a,
                            const model::Constraint &b) const;
-
-  bool equationsDependent(const model::Constraint &a,
-                          const model::Constraint &b) const;
 };
 
 } // namespace presolve

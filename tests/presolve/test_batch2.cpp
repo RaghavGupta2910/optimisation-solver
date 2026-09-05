@@ -285,14 +285,16 @@ void test_redundant_constraint() {
   auto result = presolver.run(m);
 
   assert(!result.infeasible);
-
+  assert(result.model.variables.size() == 1);
+  assert(approx(result.model.variables[0].lowerBound, 0.0));
+  assert(approx(result.model.variables[0].upperBound, 10.0));
   assert(result.model.constraints.empty());
 
   std::cout << "[PASS] Test 7: Redundant constraint\n";
 }
 
 // ============================================================
-// TEST 8 — Non-redundant constraint must remain
+// TEST 8 — Non-redundant constraint must remain / tighten bound
 // ============================================================
 //
 // x ∈ [0, 10]
@@ -322,10 +324,9 @@ void test_non_redundant_constraint() {
   assert(!result.infeasible);
 
   assert(result.model.variables.size() == 1);
-
-  // The constraint may be converted into a bound by
-  // singleton-row processing.
-  assert(result.model.variables[0].upperBound <= 5.0 + EPS);
+  assert(approx(result.model.variables[0].lowerBound, 0.0));
+  assert(approx(result.model.variables[0].upperBound, 5.0));
+  assert(result.model.constraints.empty());
 
   std::cout << "[PASS] Test 8: Non-redundant constraint\n";
 }
@@ -337,7 +338,7 @@ void test_non_redundant_constraint() {
 // x <= 10
 // x <= 10
 //
-// One copy should remain.
+// Both converted or duplicate removed, x <= 10 preserved.
 //
 void test_duplicate_constraints() {
 
@@ -360,35 +361,21 @@ void test_duplicate_constraints() {
   auto result = presolver.run(m);
 
   assert(!result.infeasible);
-
-  // Both may be converted to the same variable bound.
-  // Therefore the important correctness property is:
-  // x <= 10.
   assert(result.model.variables.size() == 1);
-  assert(result.model.variables[0].upperBound <= 10.0 + EPS);
+  assert(approx(result.model.variables[0].upperBound, 10.0));
+  assert(result.model.constraints.empty());
 
   std::cout << "[PASS] Test 9: Duplicate constraints\n";
 }
 
 // ============================================================
-// TEST 10 — Parallel constraints must not be incorrectly removed
+// TEST 10 — Parallel constraints
 // ============================================================
 //
 // x <= 10
-// 2x <= 30
+// 2x <= 30 (i.e. x <= 15)
 //
-// These are parallel, but they are NOT duplicates.
-//
-// First says:
-// x <= 10
-//
-// Second says:
-// x <= 15
-//
-// Removing either one is potentially valid only after proving
-// which is redundant.
-//
-// The presolver must preserve the stronger restriction.
+// Presolver must preserve the stronger restriction x <= 10.
 //
 void test_parallel_constraints() {
 
@@ -413,9 +400,8 @@ void test_parallel_constraints() {
   assert(!result.infeasible);
 
   assert(result.model.variables.size() == 1);
-
-  // Most importantly, x <= 10 must survive.
-  assert(result.model.variables[0].upperBound <= 10.0 + EPS);
+  assert(approx(result.model.variables[0].upperBound, 10.0));
+  assert(result.model.constraints.empty());
 
   std::cout << "[PASS] Test 10: Parallel constraints\n";
 }
