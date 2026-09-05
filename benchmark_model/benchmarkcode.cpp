@@ -4,12 +4,15 @@
 #include <string>
 #include <vector>
 #include "benchmark/benchmarkresult.h"
+#include "benchmark/instancemanager.h"
+#include "benchmark/processmanager.h"
 
 using namespace std;
 
 #ifdef _WIN32
 
 #include <windows.h>
+#include <psapi.h> 
 
 #else
 
@@ -18,6 +21,7 @@ using namespace std;
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/types.h>
+#include <sys/resource.h> 
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -25,41 +29,6 @@ using namespace std;
 
 
 namespace benchmark {
-
-// ============================================================
-// ProcessResult
-// ============================================================
-
-struct ProcessResult {
-
-    int exitCode = -1;
-
-    string stdoutOutput;
-    string stderrOutput;
-
-    chrono::milliseconds runtime{0};
-
-    bool timedOut = false;
-    bool launchFailed = false;
-};
-
-
-// ============================================================
-// ProcessManager
-// ============================================================
-
-class ProcessManager {
-
-public:
-
-    ProcessResult run(
-        const string& executable,
-        const vector<string>& arguments,
-        chrono::milliseconds timeout
-    );
-
-};
-
 
 // ============================================================
 // WINDOWS IMPLEMENTATION
@@ -70,7 +39,8 @@ public:
 ProcessResult ProcessManager::run(
     const string& executable,
     const vector<string>& arguments,
-    chrono::milliseconds timeout
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
 ) {
 
     ProcessResult result;
@@ -89,6 +59,32 @@ ProcessResult ProcessManager::run(
 
     HANDLE stderrRead = NULL;
     HANDLE stderrWrite = NULL;
+
+    HANDLE jobObject = NULL;
+
+    if (memoryLimitKB > 0) {
+
+        jobObject = CreateJobObjectA(NULL, NULL);
+
+        if (jobObject != NULL) {
+
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limitInfo{};
+
+            limitInfo.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY |
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            limitInfo.ProcessMemoryLimit =
+                static_cast<SIZE_T>(memoryLimitKB) * 1024;
+
+            SetInformationJobObject(
+                jobObject,
+                JobObjectExtendedLimitInformation,
+                &limitInfo,
+                sizeof(limitInfo)
+            );
+        }
+    }
 
 
     // --------------------------------------------------------
@@ -208,7 +204,7 @@ ProcessResult ProcessManager::run(
         NULL,
         NULL,
         TRUE,
-        0,
+        CREATE_SUSPENDED,
         NULL,
         NULL,
         &startupInfo,
@@ -229,6 +225,12 @@ ProcessResult ProcessManager::run(
 
         return result;
     }
+
+        if (jobObject != NULL) {
+        AssignProcessToJobObject(jobObject, processInfo.hProcess);
+    }
+
+    ResumeThread(processInfo.hThread);   // process was created suspended — start it now
 
 
     // --------------------------------------------------------
@@ -499,6 +501,24 @@ ProcessResult ProcessManager::run(
         );
 
 
+    PROCESS_MEMORY_COUNTERS_EX memCounters{};
+
+    if (
+        GetProcessMemoryInfo(
+            processInfo.hProcess,
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memCounters),
+            sizeof(memCounters)
+        )
+    ) {
+        result.peakMemoryKB =
+            static_cast<long long>(memCounters.PeakWorkingSetSize) / 1024;
+    }
+
+    if (jobObject != NULL) {
+        CloseHandle(jobObject);
+    }
+
+
     // --------------------------------------------------------
     // Cleanup
     // --------------------------------------------------------
@@ -523,7 +543,8 @@ ProcessResult ProcessManager::run(
 ProcessResult ProcessManager::run(
     const string& executable,
     const vector<string>& arguments,
-    chrono::milliseconds timeout
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
 ) {
 
     ProcessResult result;
@@ -632,6 +653,8 @@ ProcessResult ProcessManager::run(
         close(stderrPipe[0]);
         close(execErrorPipe[0]);
 
+        
+
 
         // ----------------------------------------------------
         // Redirect stdout
@@ -681,6 +704,24 @@ ProcessResult ProcessManager::run(
 
         close(stdoutPipe[1]);
         close(stderrPipe[1]);
+
+                 // ----------------------------------------------------
+        // Apply memory limit (best-effort)
+        // ----------------------------------------------------
+
+        if (memoryLimitKB > 0) {
+
+            struct rlimit memLimit;
+
+            memLimit.rlim_cur =
+                static_cast<rlim_t>(memoryLimitKB) * 1024;
+
+            memLimit.rlim_max =
+                static_cast<rlim_t>(memoryLimitKB) * 1024;
+
+            setrlimit(RLIMIT_AS, &memLimit);
+        }
+
 
 
         // ----------------------------------------------------
@@ -832,7 +873,24 @@ ProcessResult ProcessManager::run(
             2,
             20
         );
+        
+            // --------------------------------------------------------
+    // Peak memory usage (best-effort, Linux only)
+    // --------------------------------------------------------
 
+    struct rusage usage{};
+
+    if (getrusage(RUSAGE_CHILDREN, &usage) == 0) {
+        result.peakMemoryKB = usage.ru_maxrss;   // already in KB on Linux
+    }
+
+    if (
+        memoryLimitKB > 0 &&
+        WIFSIGNALED(waitStatus) &&
+        (WTERMSIG(waitStatus) == SIGKILL || WTERMSIG(waitStatus) == SIGSEGV)
+    ) {
+        result.memoryLimitExceeded = true;
+    }
 
         // ----------------------------------------------------
         // Drain stdout
@@ -1098,22 +1156,60 @@ ProcessResult ProcessManager::run(
 // BenchmarkResult. Does not do any solver-specific parsing.
 // ============================================================
 
-inline BenchmarkResult runBenchmark(
+BenchmarkResult runBenchmark(
     ProcessManager& manager,
     const string& solverName,
     const string& instanceName,
     const string& executable,
     const vector<string>& arguments,
-    chrono::milliseconds timeout
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
 ) {
     ProcessResult processResult =
-        manager.run(executable, arguments, timeout);
+        manager.run(executable, arguments, timeout, memoryLimitKB);
 
     return buildBenchmarkResult(
         solverName,
         instanceName,
         processResult
     );
+}
+
+// ============================================================
+// runBenchmarkSuite
+//
+// Discovers instances via InstanceManager (if given a directory)
+// or accepts an explicit list, runs each one, and returns all
+// results — ready for computeAggregateMetrics()/groupBySolver().
+// ============================================================
+
+    vector<BenchmarkResult> runBenchmarkSuite(
+    ProcessManager& manager,
+    const string& solverName,
+    const vector<BenchmarkInstance>& instances,
+    const string& executable,
+    chrono::milliseconds timeout,
+    long long memoryLimitKB
+) {
+    vector<BenchmarkResult> results;
+    results.reserve(instances.size());
+
+    for (const BenchmarkInstance& instance : instances) {
+
+        BenchmarkResult result = runBenchmark(
+            manager,
+            solverName,
+            instance.name,
+            executable,
+            { instance.path },
+            timeout,
+            memoryLimitKB
+        );
+
+        results.push_back(result);
+    }
+
+    return results;
 }
 
 } // namespace benchmark
